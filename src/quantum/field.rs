@@ -1,9 +1,10 @@
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 use std::sync::Arc;
-use std::sync::RwLock;
+use serde::{Serialize, Deserialize};
+use parking_lot::RwLock;
 use rayon::prelude::*;
 use num_complex::Complex;
+use wide::f64x4;
 use std::time::{Instant, Duration};
 
 // Импорты для Ed25519 подписей квантовых волн
@@ -17,7 +18,7 @@ use rand07::rngs::OsRng;
 
 #[derive(Debug, Clone)]
 pub struct QuantumWave {
-    pub id: String,
+    pub id: Arc<str>,
     pub amplitude: f64,
     pub phase: f64,
     pub shard_id: String,
@@ -25,6 +26,23 @@ pub struct QuantumWave {
     pub lifetime: Duration, // Время жизни волны
     pub superposition: Vec<StateVector>,
     pub signature: Vec<u8>, // Ed25519 подпись квантовой волны
+}
+
+impl Clone for ShardedQuantumField {
+    fn clone(&self) -> Self {
+        let mut new_shards: Vec<RwLock<HashMap<String, QuantumWave>>> = Vec::with_capacity(self.shards.len());
+        for s in self.shards.iter() {
+            let map = s.read();
+            new_shards.push(RwLock::new(map.clone()));
+        }
+        Self {
+            shards: new_shards,
+            interference_pattern: self.interference_pattern.clone(),
+            cache: self.cache.clone(),
+            max_waves_total: self.max_waves_total,
+            pending_updates: self.pending_updates,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +57,8 @@ pub struct QuantumField {
     pub interference_pattern: Vec<InterferencePoint>,
     cache: Arc<RwLock<HashMap<String, Vec<InterferencePoint>>>>,
     pub max_waves: usize, // Максимальное количество активных волн
+    // Счётчик отложенных обновлений интерференции (для батч-режима)
+    pending_updates: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,7 +75,62 @@ impl QuantumField {
             interference_pattern: Vec::new(),
             cache: Arc::new(RwLock::new(HashMap::new())),
             max_waves: 100_000, // Убираем искусственное ограничение для масштабируемости
+            pending_updates: 0,
         }
+    }
+
+    /// Совместимость: добавление волны с ключом Arc<str>
+    pub fn add_wave_arc(&mut self, key: Arc<str>, wave: QuantumWave) {
+        self.add_wave(key.to_string(), wave);
+    }
+
+    // Вспомогательная функция: суммирование косинусов по парам (амплитуда, фаза) с SIMD-ускорением
+    #[inline]
+    fn sum_cos_pairs(pairs: &[(f64,f64)], x: f64, decay: f64, total_amp_sum: f64) -> (f64, f64) {
+        let mut amp_sum = 0.0f64;
+        let mut phase_wsum = 0.0f64;
+        let pi2x = 2.0 * std::f64::consts::PI * x;
+        // SIMD по 4 элемента
+        let mut i = 0usize;
+        let n = pairs.len();
+        while i + 4 <= n {
+            let a = f64x4::from([pairs[i].0, pairs[i+1].0, pairs[i+2].0, pairs[i+3].0]);
+            let ph = f64x4::from([pairs[i].1, pairs[i+1].1, pairs[i+2].1, pairs[i+3].1]);
+            let ang = ph + f64x4::splat(pi2x);
+            let c = Self::simd_cos4(ang);
+            amp_sum += (a * c).to_array().iter().sum::<f64>();
+            phase_wsum += (ph * a).to_array().iter().sum::<f64>();
+            i += 4;
+        }
+        // хвост
+        for (a, ph) in &pairs[i..] {
+            amp_sum += *a * (pi2x + *ph).cos();
+            phase_wsum += *ph * *a;
+        }
+        amp_sum *= (-x * decay).exp();
+        let phase = if total_amp_sum > 0.0 { phase_wsum / total_amp_sum } else { 0.0 };
+        (amp_sum, phase)
+    }
+
+    // Быстрый косинус для вектора из 4 значений (полиномиальная аппроксимация с редукцией диапазона)
+    #[inline]
+    fn simd_cos4(x: f64x4) -> f64x4 {
+        let two_pi = f64x4::splat(2.0 * std::f64::consts::PI);
+        let inv_two_pi = f64x4::splat(1.0 / (2.0 * std::f64::consts::PI));
+        let k = (x * inv_two_pi).round();
+        let xr = x - k * two_pi;
+        let x2 = xr * xr;
+        let x4 = x2 * x2;
+        let half = f64x4::splat(0.5);
+        let inv24 = f64x4::splat(1.0 / 24.0);
+        f64x4::splat(1.0) - x2 * half + x4 * inv24
+    }
+
+    // NOTE: для шардированного поля см. impl ShardedQuantumField::snapshot_waves
+
+    /// Добавляет волну без проверки подписи (для внутреннего использования)
+    pub fn add_wave_unchecked(&mut self, key: String, wave: QuantumWave) {
+        self.add_wave(key, wave);
     }
 
     pub fn add_wave(&mut self, key: String, wave: QuantumWave) {
@@ -70,28 +145,57 @@ impl QuantumField {
         self.active_waves.insert(key, wave);
         // Убираем автоматическое обновление интерференции - будем вызывать только когда нужно
         // self.update_interference(10_000); // Обновляем интерференцию с высоким разрешением
+        // Учтём отложенное обновление
+        self.pending_updates = self.pending_updates.saturating_add(1);
+    }
+
+    /// Batch-вставка волн с минимальными накладными расходами
+    pub fn add_waves_batch<I>(&mut self, items: I)
+    where
+        I: IntoIterator<Item = (String, QuantumWave)>,
+    {
+        let mut count = 0usize;
+        for (key, wave) in items {
+            // Если достигли лимита, удаляем самую старую волну (редко)
+            if self.active_waves.len() >= self.max_waves {
+                self.remove_oldest_wave();
+            }
+            self.active_waves.insert(key, wave);
+            count += 1;
+        }
+        // Обновим счётчик отложенных изменений разом
+        self.pending_updates = self.pending_updates.saturating_add(count);
+        // Очистку просроченных волн выполняем реже — оставим на вызывающего или отдельный этап
+    }
+
+    /// Пытается выполнить пересчёт интерференции, если накопилось достаточно изменений
+    /// Возвращает true, если пересчёт был выполнен
+    pub fn maybe_flush_interference(&mut self, threshold: usize, resolution: usize) -> bool {
+        if self.pending_updates >= threshold {
+            self.update_interference(resolution);
+            self.pending_updates = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Форсированный пересчёт интерференции независимо от счётчика
+    pub fn force_flush_interference(&mut self, resolution: usize) {
+        self.update_interference(resolution);
+        self.pending_updates = 0;
     }
 
     /// Безопасно добавляет волну с проверкой подписи (Ed25519)
     pub fn add_signed_wave(&mut self, key: String, wave: QuantumWave, public_key: &VerifyingKey) -> Result<(), String> {
-        // Проверяем подпись волны перед добавлением
         if !wave.verify_signature(public_key) {
             return Err("Invalid wave signature".to_string());
         }
-        
-        // Проверяем, что волна не устарела
         if Instant::now().duration_since(wave.created_at) > wave.lifetime {
             return Err("Wave has expired".to_string());
         }
-        
-        // Добавляем волну
         self.add_wave(key, wave);
         Ok(())
-    }
-
-    /// Добавляет волну без проверки подписи (для внутреннего использования)
-    pub fn add_wave_unchecked(&mut self, key: String, wave: QuantumWave) {
-        self.add_wave(key, wave);
     }
 
     /// Проверяет состояние волны
@@ -180,44 +284,59 @@ impl QuantumField {
         }
     }
 
-    /// Рассчитывает СУММАРНУЮ интерференцию всех волн (не парную!)
-    pub fn calculate_total_interference(&self, resolution: usize) -> Vec<InterferencePoint> {
+    /// Рассчитывает суммарную интерференцию всех волн (не парную!) и пишет результат в self.interference_pattern
+    pub fn calculate_total_interference_inplace(&mut self, resolution: usize) {
         let step = 1.0 / resolution as f64;
-        
-        // Нормализуем амплитуду относительно базового разрешения (100 точек)
         let normalization_factor = resolution as f64 / 100.0;
-        
+        if self.interference_pattern.len() != resolution {
+            self.interference_pattern.resize(resolution, InterferencePoint { position: 0.0, amplitude: 0.0, phase: 0.0 });
+        }
+        // Собираем пары (амплитуда, фаза) без копирования полных волн
+        let pairs: Vec<(f64, f64)> = self.active_waves.values().map(|w| (w.amplitude, w.phase)).collect();
+        let total_amp_sum: f64 = pairs.iter().map(|(a, _)| *a).sum();
+        self.interference_pattern
+            .as_mut_slice()
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, p)| {
+                let x = i as f64 * step;
+                let (amp, phase) = Self::sum_cos_pairs(&pairs, x, /*decay*/ 0.0, total_amp_sum);
+                let normalized_amplitude = amp * normalization_factor;
+                let normalized_phase = phase; // уже нормирован на total_amp_sum
+                *p = InterferencePoint { position: x, amplitude: normalized_amplitude, phase: normalized_phase };
+            });
+    }
+
+    /// Снимок всех активных волн (для не-шардированного поля)
+    pub fn snapshot_waves(&self) -> Vec<QuantumWave> {
+        let mut out = Vec::with_capacity(self.active_waves.len());
+        for w in self.active_waves.values() { out.push(w.clone()); }
+        out
+    }
+
+    /// Рассчитать интерференцию c добавлением дополнительных волн (без мутации поля)
+    pub fn calculate_interference_with_extra(&self, extra: &[QuantumWave], resolution: usize) -> Vec<InterferencePoint> {
+        let step = 1.0 / resolution as f64;
+        let normalization_factor = resolution as f64 / 100.0;
         (0..resolution).into_par_iter().map(|i| {
             let x = i as f64 * step;
-            let mut total_amplitude = 0.0;
+            let mut total_ampl = 0.0;
             let mut total_phase = 0.0;
-            
-            // Суммируем вклад ВСЕХ волн в точке x
-            for wave in self.active_waves.values() {
-                // Правильная физика: 2π * x + phase
-                let contribution = wave.amplitude * (2.0 * std::f64::consts::PI * x + wave.phase).cos();
-                total_amplitude += contribution;
-                
-                // Фаза как средневзвешенная
-                total_phase += wave.phase * wave.amplitude;
+            let mut total_amp_sum = 0.0;
+            for w in self.active_waves.values() {
+                let contrib = w.amplitude * (2.0 * std::f64::consts::PI * x + w.phase).cos();
+                total_ampl += contrib;
+                total_phase += w.phase * w.amplitude;
+                total_amp_sum += w.amplitude;
             }
-            
-            // Нормализуем амплитуду для высокого разрешения
-            let normalized_amplitude = total_amplitude * normalization_factor;
-            
-            // Нормализуем фазу
-            let total_amplitude_sum: f64 = self.active_waves.values().map(|w| w.amplitude).sum();
-            let normalized_phase = if total_amplitude_sum > 0.0 {
-                total_phase / total_amplitude_sum
-            } else {
-                0.0
-            };
-            
-            InterferencePoint {
-                position: x,
-                amplitude: normalized_amplitude, // Нормализованная амплитуда!
-                phase: normalized_phase,
+            let mut pairs: Vec<(f64, f64)> = self.active_waves.values().map(|w| (w.amplitude, w.phase)).collect();
+            for w in extra.iter() {
+                pairs.push((w.amplitude, w.phase));
             }
+            let (amp, phase) = Self::sum_cos_pairs(&pairs, x, /*decay*/ 0.0, total_amp_sum);
+            let normalized_amplitude = amp * normalization_factor;
+            let normalized_phase = phase; // уже нормирован на total_amp_sum
+            InterferencePoint { position: x, amplitude: normalized_amplitude, phase: normalized_phase }
         }).collect()
     }
 
@@ -226,20 +345,25 @@ impl QuantumField {
         let cache_key = self.generate_cache_key();
         
         // Проверяем кэш
-        if let Ok(cache) = self.cache.read() {
+        {
+            let cache = self.cache.read();
             if let Some(cached) = cache.get(&cache_key) {
                 self.interference_pattern = cached.clone();
                 return;
             }
         }
         
-        // Рассчитываем СУММАРНУЮ интерференцию всех волн
-        self.interference_pattern = self.calculate_total_interference(resolution);
+        // Рассчитываем СУММАРНУЮ интерференцию всех волн inplace
+        self.calculate_total_interference_inplace(resolution);
         
         // Кэшируем результат
-        if let Ok(mut cache) = self.cache.write() {
-            cache.insert(cache_key, self.interference_pattern.clone());
-        }
+        let mut cache = self.cache.write();
+        cache.insert(cache_key, self.interference_pattern.clone());
+    }
+
+    /// Возвращает текущее количество отложенных изменений для интерференции
+    pub fn pending_update_count(&self) -> usize {
+        self.pending_updates
     }
 
     /// Рассчитывает интерференцию с высоким разрешением (10k+ точек)
@@ -250,7 +374,13 @@ impl QuantumField {
             return Vec::new();
         }
         
-        self.calculate_total_interference(resolution)
+        // API совместимость: возвращаем копию текущего буфера
+        if self.interference_pattern.len() != resolution {
+            // если вызывали без предварительного update, посчитаем inplace
+            let mut me = self as *const Self as *mut Self; // безопасно при эксклюзивном &self использовании
+            unsafe { (*me).calculate_total_interference_inplace(resolution); }
+        }
+        self.interference_pattern.clone()
     }
 
     fn generate_cache_key(&self) -> String {
@@ -289,9 +419,9 @@ impl QuantumField {
     }
 
     /// Обновляет амплитуды волн на основе результатов валидации
-    pub fn update_wave_amplitudes(&mut self, validation_results: &HashMap<String, WaveValidationResult>) {
+    pub fn update_wave_amplitudes(&mut self, validation_results: &HashMap<Arc<str>, WaveValidationResult>) {
         for (wave_id, result) in validation_results {
-            if let Some(wave) = self.active_waves.get_mut(wave_id) {
+            if let Some(wave) = self.active_waves.get_mut(wave_id.as_ref()) {
                 wave.update_amplitude(result);
             }
         }
@@ -342,9 +472,9 @@ pub enum WaveHealthStatus {
 }
 
 impl QuantumWave {
-    pub fn new(id: String, amplitude: f64, phase: f64, shard_id: String, superposition: Vec<StateVector>) -> Self {
+    pub fn new<I: Into<Arc<str>>>(id: I, amplitude: f64, phase: f64, shard_id: String, superposition: Vec<StateVector>) -> Self {
         Self {
-            id,
+            id: id.into(),
             amplitude,
             phase,
             shard_id,
@@ -356,15 +486,15 @@ impl QuantumWave {
     }
 
     /// Создает подписанную квантовую волну
-    pub fn new_signed(
-        id: String, 
+    pub fn new_signed<I: Into<Arc<str>>>(
+        id: I, 
         amplitude: f64, 
         phase: f64, 
         shard_id: String, 
         superposition: Vec<StateVector>,
         secret_key: &SigningKey
     ) -> Self {
-        let mut wave = Self::new(id.clone(), amplitude, phase, shard_id, superposition);
+        let mut wave = Self::new(id, amplitude, phase, shard_id, superposition);
         
         // Подписываем САМУ ВОЛНУ, а не транзакцию!
         let wave_message = format!(
@@ -424,7 +554,7 @@ impl QuantumWave {
 impl Default for QuantumWave {
     fn default() -> Self {
         Self {
-            id: String::new(),
+            id: Arc::<str>::from(""),
             amplitude: 1.0,
             phase: 0.0,
             shard_id: String::new(),
@@ -474,7 +604,7 @@ impl Default for QuantumState {
 impl From<QuantumWave> for QuantumState {
     fn from(wave: QuantumWave) -> Self {
         Self {
-            id: wave.id,
+            id: wave.id.to_string(),
             amplitude: wave.amplitude,
             phase: wave.phase,
             shard_id: wave.shard_id,
@@ -487,7 +617,7 @@ impl From<QuantumWave> for QuantumState {
 impl From<&QuantumWave> for QuantumState {
     fn from(wave: &QuantumWave) -> Self {
         Self {
-            id: wave.id.clone(),
+            id: wave.id.to_string(),
             amplitude: wave.amplitude,
             phase: wave.phase,
             shard_id: wave.shard_id.clone(),
@@ -500,7 +630,7 @@ impl From<&QuantumWave> for QuantumState {
 impl From<QuantumState> for QuantumWave {
     fn from(state: QuantumState) -> Self {
         Self {
-            id: state.id,
+            id: state.id.into(),
             amplitude: state.amplitude,
             phase: state.phase,
             shard_id: state.shard_id,
@@ -516,6 +646,341 @@ impl From<QuantumState> for QuantumWave {
 pub struct InterferenceField {
     pub cache: Arc<RwLock<HashMap<String, Vec<InterferencePoint>>>>,
 } 
+
+/// Подготовительная структура для шардирования поля по сегментам.
+/// Пока не используется, добавлена как плейсхолдер для последующей интеграции.
+#[derive(Debug)]
+pub struct ShardedQuantumField {
+    /// Шарды активных волн
+    shards: Vec<RwLock<HashMap<String, QuantumWave>>>,
+    /// Интерференционный паттерн для всего поля
+    pub interference_pattern: Vec<InterferencePoint>,
+    /// Кэш интерференции (по ключу набора волн)
+    pub cache: Arc<RwLock<HashMap<String, Vec<InterferencePoint>>>>,
+    /// Максимальный размер суммарно по всем шардам
+    pub max_waves_total: usize,
+    /// Суммарный счётчик отложенных обновлений
+    pending_updates: usize,
+}
+
+impl ShardedQuantumField {
+    pub fn new(shards: usize, max_waves_total: usize) -> Self {
+        let n = shards.max(1);
+        let mut vec = Vec::with_capacity(n);
+        for _ in 0..n { vec.push(RwLock::new(HashMap::new())); }
+        Self {
+            shards: vec,
+            interference_pattern: Vec::new(),
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            max_waves_total,
+            pending_updates: 0,
+        }
+    }
+
+    #[inline]
+    fn shard_index_for(&self, key: &str) -> usize {
+        use std::hash::{Hash, Hasher};
+        let mut h = ahash::AHasher::default();
+        key.hash(&mut h);
+        (h.finish() as usize) % self.shards.len()
+    }
+
+    pub fn total_active_waves(&self) -> usize {
+        self.shards.iter().map(|s| s.read().len()).sum()
+    }
+
+    pub fn add_wave(&mut self, key: String, wave: QuantumWave) {
+        // Контроль общего лимита (грубый): если превышен — удаляем самую старую из наибольшего шарда
+        if self.total_active_waves() >= self.max_waves_total {
+            self.remove_oldest_wave();
+        }
+        let idx = self.shard_index_for(&key);
+        let mut map = self.shards[idx].write();
+        map.insert(key, wave);
+        self.pending_updates = self.pending_updates.saturating_add(1);
+    }
+
+    pub fn add_waves_batch<I>(&mut self, items: I)
+    where
+        I: IntoIterator<Item = (String, QuantumWave)>,
+    {
+        // Сгруппируем по шардам, чтобы минимизировать переключения локов
+        let mut buckets: Vec<Vec<(String, QuantumWave)>> = vec![Vec::new(); self.shards.len()];
+        let mut count = 0usize;
+        for (k, w) in items.into_iter() {
+            let idx = self.shard_index_for(&k);
+            buckets[idx].push((k, w));
+            count += 1;
+        }
+        // Грубый контроль лимита
+        if self.total_active_waves() + count > self.max_waves_total {
+            self.remove_oldest_wave();
+        }
+        for (idx, batch) in buckets.into_iter().enumerate() {
+            if batch.is_empty() { continue; }
+            let mut map = self.shards[idx].write();
+            for (k, w) in batch { map.insert(k, w); }
+        }
+        self.pending_updates = self.pending_updates.saturating_add(count);
+    }
+
+    pub fn get_wave(&self, key: &str) -> Result<QuantumWave, String> {
+        let idx = self.shard_index_for(key);
+        self.shards[idx].read().get(key)
+            .cloned()
+            .ok_or_else(|| format!("Wave not found: {}", key))
+    }
+
+    pub fn check_wave_health(&self, wave_id: &str) -> Option<WaveHealth> {
+        if let Ok(w) = self.get_wave(wave_id) {
+            let age = Instant::now().duration_since(w.created_at);
+            let health_ratio = age.as_secs_f64() / w.lifetime.as_secs_f64();
+            let status = if health_ratio < 0.3 { WaveHealthStatus::Young } else if health_ratio < 0.7 { WaveHealthStatus::Mature } else if health_ratio < 0.9 { WaveHealthStatus::Aging } else { WaveHealthStatus::Expired };
+            Some(WaveHealth { wave_id: wave_id.to_string(), amplitude: w.amplitude, age_ratio: health_ratio, status })
+        } else { None }
+    }
+
+    pub fn cleanup_expired_waves(&mut self) {
+        let now = Instant::now();
+        self.shards.iter().for_each(|s| {
+            let mut map = s.write();
+            map.retain(|_, w| now.duration_since(w.created_at) < w.lifetime);
+        });
+    }
+
+    pub fn remove_oldest_wave(&mut self) {
+        // Найдём самую старую волну среди всех шардов (O(total)) — редкий путь
+        let mut oldest: Option<(usize, String, Instant)> = None;
+        for (i, s) in self.shards.iter().enumerate() {
+            let map = s.read();
+            for (k, w) in map.iter() {
+                if let Some((_, _, t)) = &oldest {
+                    if w.created_at < *t { oldest = Some((i, k.clone(), w.created_at)); }
+                } else {
+                    oldest = Some((i, k.clone(), w.created_at));
+                }
+            }
+        }
+        if let Some((i, k, _)) = oldest {
+            let mut map = self.shards[i].write();
+            map.remove(&k);
+        }
+    }
+
+    pub fn verify_waves_parallel<'a>(&self, items: &[( &'a QuantumWave, VerifyingKey )]) -> bool {
+        items.par_iter().all(|(wave, vk)| wave.verify_signature(vk))
+    }
+
+    pub fn verify_waves_batch<'a>(&self, items: &[( &'a QuantumWave, VerifyingKey )]) -> bool {
+        #[cfg(feature = "zebra_batch")]
+        {
+            let mut verifier = ZebraVerifier::new();
+            for (wave, dalek_vk) in items.iter() {
+                let msg = format!("{}:{}:{}:{}", wave.id, wave.amplitude, wave.phase, wave.shard_id);
+                let vk_bytes = dalek_vk.to_bytes();
+                let zvk = ZebraVKBytes::from(vk_bytes);
+                if wave.signature.len() != 64 { return false; }
+                let mut sig_bytes = [0u8; 64];
+                sig_bytes.copy_from_slice(&wave.signature);
+                let zsig = match ZebraSig::try_from(sig_bytes) { Ok(s) => s, Err(_) => return false };
+                verifier.queue((zvk, zsig, msg.as_bytes()));
+            }
+            let mut rng = OsRng;
+            verifier.verify(&mut rng).is_ok()
+        }
+        #[cfg(not(feature = "zebra_batch"))]
+        {
+            self.verify_waves_parallel(items)
+        }
+    }
+
+    pub fn update_interference(&mut self, resolution: usize) {
+        let cache_key = self.generate_cache_key();
+        {
+            let cache = self.cache.read();
+            if let Some(cached) = cache.get(&cache_key) {
+                self.interference_pattern = cached.clone();
+                return;
+            }
+        }
+        // Параллельный расчёт по шардам и редукция
+        let step = 1.0 / resolution as f64;
+        let normalization_factor = resolution as f64 / 100.0;
+        let shards_refs: Vec<_> = self.shards.iter().collect();
+        let pattern: Vec<InterferencePoint> = (0..resolution).into_par_iter().map(|i| {
+            let x = i as f64 * step;
+            let mut total_ampl = 0.0;
+            let mut total_phase = 0.0;
+            let mut total_amp_sum = 0.0;
+            for s in shards_refs.iter() {
+                let map = s.read();
+                for w in map.values() {
+                    let contrib = w.amplitude * (2.0 * std::f64::consts::PI * x + w.phase).cos();
+                    total_ampl += contrib;
+                    total_phase += w.phase * w.amplitude;
+                    total_amp_sum += w.amplitude;
+                }
+            }
+            let normalized_amplitude = total_ampl * normalization_factor;
+            let normalized_phase = if total_amp_sum > 0.0 { total_phase / total_amp_sum } else { 0.0 };
+            InterferencePoint { position: x, amplitude: normalized_amplitude, phase: normalized_phase }
+        }).collect();
+        self.interference_pattern = pattern;
+        {
+            let mut cache = self.cache.write();
+            cache.insert(cache_key, self.interference_pattern.clone());
+        }
+    }
+
+    pub fn calculate_interference_pattern(&self, resolution: Option<usize>) -> Vec<InterferencePoint> {
+        let resolution = resolution.unwrap_or(10_000);
+        if self.total_active_waves() == 0 { return Vec::new(); }
+        // Непосредственный расчёт без записи в self
+        let step = 1.0 / resolution as f64;
+        let normalization_factor = resolution as f64 / 100.0;
+        let shards_refs: Vec<_> = self.shards.iter().collect();
+        (0..resolution).into_par_iter().map(|i| {
+            let x = i as f64 * step;
+            let mut total_ampl = 0.0;
+            let mut total_phase = 0.0;
+            let mut total_amp_sum = 0.0;
+            for s in shards_refs.iter() {
+                let map = s.read();
+                for w in map.values() {
+                    let contrib = w.amplitude * (2.0 * std::f64::consts::PI * x + w.phase).cos();
+                    total_ampl += contrib;
+                    total_phase += w.phase * w.amplitude;
+                    total_amp_sum += w.amplitude;
+                }
+            }
+            let normalized_amplitude = total_ampl * normalization_factor;
+            let normalized_phase = if total_amp_sum > 0.0 { total_phase / total_amp_sum } else { 0.0 };
+            InterferencePoint { position: x, amplitude: normalized_amplitude, phase: normalized_phase }
+        }).collect()
+    }
+
+    fn generate_cache_key(&self) -> String {
+        let mut keys: Vec<String> = Vec::new();
+        for s in self.shards.iter() {
+            let map = s.read();
+            for k in map.keys() { keys.push(k.clone()); }
+        }
+        keys.sort();
+        keys.join("|")
+    }
+
+    pub fn get_active_wave_count(&self) -> usize { self.total_active_waves() }
+
+    pub fn get_wave_lifetimes(&self) -> Vec<Duration> {
+        let now = Instant::now();
+        let mut v = Vec::new();
+        for s in self.shards.iter() {
+            let map = s.read();
+            for w in map.values() { v.push(now.duration_since(w.created_at)); }
+        }
+        v
+    }
+
+    pub fn remove_extinguished_waves(&mut self) {
+        self.shards.iter().for_each(|s| {
+            let mut map = s.write();
+            map.retain(|_, w| w.amplitude > 0.01 && Instant::now().duration_since(w.created_at) < w.lifetime);
+        });
+    }
+
+    pub fn update_wave_amplitudes(&mut self, validation_results: &HashMap<Arc<str>, WaveValidationResult>) {
+        for s in self.shards.iter() {
+            let mut map = s.write();
+            for (wave_id, result) in validation_results.iter() {
+                if let Some(wave) = map.get_mut(wave_id.as_ref()) { wave.update_amplitude(result); }
+            }
+        }
+    }
+
+    pub fn get_wave_statistics(&self) -> WaveStatistics {
+        let mut total = 0usize;
+        let mut total_ampl = 0.0;
+        let mut strong = 0usize;
+        let mut weak = 0usize;
+        for s in self.shards.iter() {
+            let map = s.read();
+            total += map.len();
+            for w in map.values() {
+                total_ampl += w.amplitude;
+                if w.amplitude > 0.5 { strong += 1; }
+                if w.amplitude < 0.1 { weak += 1; }
+            }
+        }
+        let avg = if total > 0 { total_ampl / total as f64 } else { 0.0 };
+        WaveStatistics { total_waves: total, total_amplitude: total_ampl, average_amplitude: avg, strong_waves: strong, weak_waves: weak }
+    }
+
+    pub fn maybe_flush_interference(&mut self, threshold: usize, resolution: usize) -> bool {
+        if self.pending_updates >= threshold {
+            self.update_interference(resolution);
+            self.pending_updates = 0;
+            true
+        } else { false }
+    }
+
+    pub fn force_flush_interference(&mut self, resolution: usize) {
+        self.update_interference(resolution);
+        self.pending_updates = 0;
+    }
+
+    /// Снимок всех активных волн во всех шардах
+    pub fn snapshot_waves(&self) -> Vec<QuantumWave> {
+        let mut out = Vec::with_capacity(self.total_active_waves());
+        for s in self.shards.iter() {
+            let map = s.read();
+            out.extend(map.values().cloned());
+        }
+        out
+    }
+
+    /// Безопасное добавление подписанной волны (аналогично QuantumField)
+    pub fn add_signed_wave(&mut self, key: String, wave: QuantumWave, public_key: &VerifyingKey) -> Result<(), String> {
+        if !wave.verify_signature(public_key) {
+            return Err("Invalid wave signature".to_string());
+        }
+        if Instant::now().duration_since(wave.created_at) > wave.lifetime {
+            return Err("Wave has expired".to_string());
+        }
+        self.add_wave(key, wave);
+        Ok(())
+    }
+
+    /// Рассчитать интерференцию c добавлением дополнительных волн (без мутации поля)
+    pub fn calculate_interference_with_extra(&self, extra: &[QuantumWave], resolution: usize) -> Vec<InterferencePoint> {
+        let step = 1.0 / resolution as f64;
+        let normalization_factor = resolution as f64 / 100.0;
+        let shards_refs: Vec<_> = self.shards.iter().collect();
+        (0..resolution).into_par_iter().map(|i| {
+            let x = i as f64 * step;
+            let mut total_ampl = 0.0;
+            let mut total_phase = 0.0;
+            let mut total_amp_sum = 0.0;
+            for s in shards_refs.iter() {
+                let map = s.read();
+                for w in map.values() {
+                    let contrib = w.amplitude * (2.0 * std::f64::consts::PI * x + w.phase).cos();
+                    total_ampl += contrib;
+                    total_phase += w.phase * w.amplitude;
+                    total_amp_sum += w.amplitude;
+                }
+            }
+            for w in extra.iter() {
+                let contrib = w.amplitude * (2.0 * std::f64::consts::PI * x + w.phase).cos();
+                total_ampl += contrib;
+                total_phase += w.phase * w.amplitude;
+                total_amp_sum += w.amplitude;
+            }
+            let normalized_amplitude = total_ampl * normalization_factor;
+            let normalized_phase = if total_amp_sum > 0.0 { total_phase / total_amp_sum } else { 0.0 };
+            InterferencePoint { position: x, amplitude: normalized_amplitude, phase: normalized_phase }
+        }).collect()
+    }
+}
 
 // Добавляем enum для результатов валидации волны
 #[derive(Debug, Clone)]

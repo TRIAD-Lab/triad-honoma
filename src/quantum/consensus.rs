@@ -1,7 +1,9 @@
-use crate::quantum::{QuantumField, InterferenceEngine, QuantumWave, QuantumState, StateVector};
+use crate::quantum::{InterferenceEngine, QuantumWave, QuantumState, StateVector};
+use crate::quantum::field::ShardedQuantumField;
 use crate::quantum::prob_ops::ProbabilisticOperation;
 use crate::transaction::processor::QuantumTransactionProcessor;
 use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier};
+use bytes::Bytes;
 use rand::{rngs::StdRng, SeedableRng};
 use num_complex::Complex;
 use rayon::prelude::*;
@@ -13,7 +15,7 @@ use serde::{Serialize, Deserialize};
 pub struct ConsensusNode {
     pub id: String,
     pub shard_id: usize,
-    pub field: QuantumField,
+    pub field: ShardedQuantumField,
     pub engine: InterferenceEngine,
     pub secret_key: SigningKey,
     pub public_key: VerifyingKey,
@@ -24,7 +26,7 @@ pub struct ConsensusNode {
 pub struct ConsensusMessage {
     pub sender_id: String,
     pub state_id: String,
-    pub raw_data: Vec<u8>,
+    pub raw_data: Bytes,
     pub signature: Vec<u8>,
 }
 
@@ -61,10 +63,11 @@ impl ConsensusNode {
         let mut rng: StdRng = StdRng::from_entropy();
         let secret_key = SigningKey::generate(&mut rng);
         let public_key = secret_key.verifying_key();
+        let shards = num_cpus::get().next_power_of_two();
         Self {
             id,
             shard_id,
-            field: QuantumField::new(),
+            field: ShardedQuantumField::new(shards, 1_000_000),
             engine: InterferenceEngine::new(1000, 0.95),
             secret_key,
             public_key,
@@ -85,7 +88,7 @@ impl ConsensusNode {
 
     pub fn process_message(&mut self, message: ConsensusMessage, sender_public_key: &VerifyingKey) -> Result<QuantumState, String> {
         // First, verify the signature
-        if !Self::verify_message(sender_public_key, &message.signature, &message.raw_data) {
+        if !Self::verify_message(sender_public_key, &message.signature, message.raw_data.as_ref()) {
             return Err("Invalid signature".to_string());
         }
 
@@ -160,7 +163,7 @@ impl ConsensusNode {
         let _wave = self.field.get_wave(state_id)?;
         
         // Получаем ВСЕ активные волны из поля для расчёта интерференции
-        let all_waves: Vec<QuantumWave> = self.field.active_waves.values().cloned().collect();
+        let all_waves: Vec<QuantumWave> = self.field.snapshot_waves();
         
         if all_waves.len() < 2 {
             return Ok(true); // Нужно минимум 2 волны для интерференции
@@ -196,7 +199,7 @@ impl ConsensusNode {
         
         // 2. Добавляем все волны в квантовое поле
         for wave in &waves {
-            self.field.add_wave(wave.id.clone(), wave.clone());
+            self.field.add_wave(wave.id.to_string(), wave.clone());
         }
         
         // 3. Рассчитываем интерференцию для ВСЕХ волн вместе
@@ -273,7 +276,8 @@ impl ConsensusNode {
 
     /// Рассчитывает конфликт фаз между волнами
     fn calculate_phase_conflict(&self) -> f64 {
-        let waves: Vec<&QuantumWave> = self.field.active_waves.values().collect();
+        let snapshot = self.field.snapshot_waves();
+        let waves: Vec<&QuantumWave> = snapshot.iter().collect();
         if waves.len() < 2 {
             return 0.0;
         }
@@ -304,7 +308,7 @@ impl ConsensusNode {
         let mut total_ttl_factor = 0.0;
         let mut wave_count = 0;
         
-        for wave in self.field.active_waves.values() {
+        for wave in self.field.snapshot_waves().iter() {
             let age = now.duration_since(wave.created_at);
             let ttl_ratio = age.as_secs_f64() / wave.lifetime.as_secs_f64();
             
@@ -385,7 +389,7 @@ impl ConsensusNode {
         }
         
         // Получаем ВСЕ активные волны из поля
-        let all_waves: Vec<QuantumWave> = self.field.active_waves.values().cloned().collect();
+        let all_waves: Vec<QuantumWave> = self.field.snapshot_waves();
         
         if all_waves.len() < 2 {
             return Ok(vec![true; state_ids.len()]); // Нужно минимум 2 волны
@@ -467,7 +471,7 @@ impl ConsensusNode {
         // Добавляем валидные волны в поле (повторная проверка допустима для надёжности)
         let mut accepted = 0usize;
         for (wave, vk) in items.drain(..) {
-            match self.field.add_signed_wave(wave.id.clone(), wave.clone(), &vk) {
+            match self.field.add_signed_wave(wave.id.to_string(), wave.clone(), &vk) {
                 Ok(_) => accepted += 1,
                 Err(e) => {
                     // Если повторная проверка не прошла (например, TTL), пропускаем
@@ -479,13 +483,10 @@ impl ConsensusNode {
         // Физическая валидация через интерференцию и настройка жизненного цикла
         // Для упрощения применяем решение по каждой волне отдельно (метод сам считает интерференцию со всеми)
         use crate::quantum::field::WaveValidationResult;
-        let mut results: HashMap<String, WaveValidationResult> = HashMap::new();
-        let ids: Vec<String> = self.field.active_waves.keys().cloned().collect();
-        for id in ids {
-            if let Ok(w) = self.field.get_wave(&id) {
-                let verdict = self.validate_wave_through_interference(&w);
-                results.insert(id, verdict);
-            }
+        let mut results: HashMap<Arc<str>, WaveValidationResult> = HashMap::new();
+        for w in self.field.snapshot_waves().into_iter() {
+            let verdict = self.validate_wave_through_interference(&w);
+            results.insert(Arc::clone(&w.id), verdict);
         }
 
         // Применяем изменения амплитуд/TTL в соответствии с результатами
@@ -538,14 +539,9 @@ impl ConsensusNode {
         }
         
         // 2. Добавляем волну во временное поле для анализа интерференции
-        let mut temp_field = self.field.clone();
-        temp_field.add_wave_unchecked(wave.id.clone(), wave.clone());
-        
-        // 3. Рассчитываем интерференцию ВСЕХ волн вместе
-        let all_waves: Vec<QuantumWave> = temp_field.active_waves.values().cloned().collect();
-        let states: Vec<QuantumState> = all_waves.iter().map(|w| w.into()).collect();
-        
-        let pattern = self.engine.calculate_interference_pattern(&states);
+        // 3. Рассчитываем интерференцию ВСЕХ волн вместе + добавленная
+        let extra = vec![wave.clone()];
+        let pattern = self.field.calculate_interference_with_extra(&extra, 10_000);
         let analysis = self.engine.analyze_interference(&pattern);
         
         // 4. Принимаем решение на основе интерференции
@@ -585,7 +581,8 @@ impl ConsensusNode {
 
     /// Рассчитывает конфликт фаз между волнами
     fn calculate_phase_conflict_with_wave(&self, target_wave: &QuantumWave) -> f64 {
-        let waves: Vec<&QuantumWave> = self.field.active_waves.values().collect();
+        let snapshot = self.field.snapshot_waves();
+        let waves: Vec<&QuantumWave> = snapshot.iter().collect();
         if waves.len() < 2 {
             return 0.0;
         }

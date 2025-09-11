@@ -6,6 +6,7 @@ use log::{debug, error, info};
 
 use crate::network::error::NetworkError;
 use crate::network::types::{Message, NetworkEvent};
+use bytes::Bytes;
 use crate::network::transport::TransportService;
 use crate::network::MessageType;
 
@@ -41,7 +42,7 @@ impl MessageService {
             self.node_id,
             Some(peer_id),
             message_type,
-            payload,
+            Bytes::from(payload),
         );
         
         // Отправляем сообщение
@@ -55,7 +56,7 @@ impl MessageService {
             self.node_id,
             None, // Broadcast
             message_type.clone(),
-            payload,
+            Bytes::from(payload),
         );
         
         info!("Рассылка сообщения всем узлам: тип={:?}, id={}", message_type, message.id);

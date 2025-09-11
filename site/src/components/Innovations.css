@@ -1,7 +1,0 @@
-.innovations-container{max-width:72rem;margin:0 auto;padding:4rem 1rem}
-.innovation-section{min-height:80vh;display:flex;flex-direction:column;justify-content:center;gap:1rem;border-left:1px solid rgba(255,255,255,0.08);padding-left:1.25rem;margin-left:.25rem}
-.innovation-title{font-size:clamp(2rem,6vw,4.5rem);line-height:1.05;font-weight:800;letter-spacing:-0.02em;background:linear-gradient(180deg,#fff,rgba(255,255,255,.75));-webkit-background-clip:text;background-clip:text;color:transparent;text-shadow:0 0 18px rgba(255,255,255,0.12)}
-.innovation-text{font-size:clamp(1rem,2.2vw,1.35rem);color:rgba(255,255,255,0.78);max-width:60ch}
-
-/* subtle separators */
-.innovation-section+.innovation-section{border-image:linear-gradient(180deg,rgba(255,255,255,.12),rgba(255,255,255,0)) 1 100%;}

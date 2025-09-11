@@ -1,11 +1,11 @@
 
-use crate::quantum::field::{QuantumState, InterferencePoint, QuantumField};
+use crate::quantum::field::{QuantumState, InterferencePoint, QuantumField, QuantumWave};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use rayon::prelude::*;
 use sha2::{Sha256, Digest};
-use serde_json;
+use wide::f64x4;
 
 #[cfg(feature = "cuda")]
 use cust::prelude::*;
@@ -14,6 +14,46 @@ use ocl::{ProQue, Buffer};
 
 pub trait QuantumInterferenceAccelerator {
     fn calculate(&self, states: &[QuantumState], resolution: usize) -> Vec<InterferencePoint>;
+}
+
+// --- SIMD helpers (module-level) ---
+#[inline]
+fn simd_cos4(x: f64x4) -> f64x4 {
+    let two_pi = f64x4::splat(2.0 * std::f64::consts::PI);
+    let inv_two_pi = f64x4::splat(1.0 / (2.0 * std::f64::consts::PI));
+    let k = (x * inv_two_pi).round();
+    let xr = x - k * two_pi;
+    let x2 = xr * xr;
+    let x4 = x2 * x2;
+    let half = f64x4::splat(0.5);
+    let inv24 = f64x4::splat(1.0 / 24.0);
+    f64x4::splat(1.0) - x2 * half + x4 * inv24
+}
+
+#[inline]
+fn sum_cos_pairs(pairs: &[(f64,f64)], x: f64, decay: f64, total_amp_sum: f64) -> (f64, f64) {
+    let mut amp_sum = 0.0f64;
+    let mut phase_wsum = 0.0f64;
+    let pi2x = 2.0 * std::f64::consts::PI * x;
+
+    let mut i = 0usize;
+    let n = pairs.len();
+    while i + 4 <= n {
+        let a = f64x4::from([pairs[i].0, pairs[i+1].0, pairs[i+2].0, pairs[i+3].0]);
+        let ph = f64x4::from([pairs[i].1, pairs[i+1].1, pairs[i+2].1, pairs[i+3].1]);
+        let ang = ph + f64x4::splat(pi2x);
+        let c = simd_cos4(ang);
+        amp_sum += (a * c).to_array().iter().sum::<f64>();
+        phase_wsum += (ph * a).to_array().iter().sum::<f64>();
+        i += 4;
+    }
+    for (a, ph) in &pairs[i..] {
+        amp_sum += *a * (pi2x + *ph).cos();
+        phase_wsum += *ph * *a;
+    }
+    amp_sum *= (-x * decay).exp();
+    let phase = if total_amp_sum > 0.0 { phase_wsum / total_amp_sum } else { 0.0 };
+    (amp_sum, phase)
 }
 
 pub struct CpuAccelerator;
@@ -81,6 +121,8 @@ pub struct InterferenceEngine {
     cache: Arc<RwLock<HashMap<String, Vec<InterferencePoint>>>>,
     // Reusable buffer to avoid per-call allocations
     state_buffer: Vec<QuantumState>,
+    // Reusable output buffer to reduce reallocations
+    pattern_buffer: Vec<InterferencePoint>,
 }
 
 impl InterferenceEngine {
@@ -92,16 +134,16 @@ impl InterferenceEngine {
             decay_factor,
             cache: Arc::new(RwLock::new(HashMap::new())),
             state_buffer: Vec::new(),
+            pattern_buffer: Vec::new(),
         }
     }
 
     pub fn calculate_interference_pattern(&self, states: &[QuantumState]) -> Vec<InterferencePoint> {
         // Check cache
         let cache_key = self.generate_cache_key(states);
-        if let Ok(cache) = self.cache.read() {
-            if let Some(cached) = cache.get(&cache_key) {
-                return cached.clone();
-            }
+        let cache = self.cache.read();
+        if let Some(cached) = cache.get(&cache_key) {
+            return cached.clone();
         }
 
         let step = 1.0 / self.resolution as f64;
@@ -116,7 +158,7 @@ impl InterferenceEngine {
                 
                 // Прямой проход по состояниям без промежуточных векторов
                 for state in states {
-                    let contribution = self.calculate_state_contribution_fast(state.amplitude, state.phase, x);
+                    let contribution = InterferenceEngine::calculate_state_contribution_fast(state.amplitude, state.phase, x);
                     total_amplitude += contribution.0;
                     total_phase += contribution.1;
                 }
@@ -133,9 +175,8 @@ impl InterferenceEngine {
             .collect();
         
         // Save to cache
-        if let Ok(mut cache) = self.cache.write() {
-            cache.insert(cache_key, pattern.clone());
-        }
+        let mut cache = self.cache.write();
+        cache.insert(cache_key, pattern.clone());
         
         pattern
     }
@@ -153,8 +194,100 @@ impl InterferenceEngine {
         // Run calculation with GPU acceleration if available
         self.calculate_interference_auto(&self.state_buffer)
     }
+
+    /// Вариант для шардированного поля/снимка волн: строим буфер состояний и считаем inplace.
+    pub fn calculate_interference_from_waves_inplace(&mut self, waves: &[QuantumWave]) -> Vec<InterferencePoint> {
+        // Перейдём на пары (amp, phase), чтобы не копировать лишние поля
+        let pairs: Vec<(f64,f64)> = waves.iter().map(|w| (w.amplitude, w.phase)).collect();
+        self.calculate_interference_from_pairs_inplace(&pairs)
+    }
+
+    /// In-place версия расчёта интерференции, пишет во внутренний буфер и возвращает копию результата.
+    /// Это снижает число аллокаций (буфер переиспользуется между вызовами).
+    pub fn calculate_interference_pattern_inplace(&mut self, states: &[QuantumState]) -> Vec<InterferencePoint> {
+        // Кэш
+        let cache_key = self.generate_cache_key(states);
+        {
+            let cache = self.cache.read();
+            if let Some(cached) = cache.get(&cache_key) {
+                return cached.clone();
+            }
+        }
+        // Подготовка буфера результата
+        let res = self.resolution;
+        if self.pattern_buffer.len() != res {
+            self.pattern_buffer.resize(res, InterferencePoint { position: 0.0, amplitude: 0.0, phase: 0.0 });
+        }
+        let step = 1.0 / self.resolution as f64;
+        let decay = self.decay_factor;
+        // Параллельное заполнение буфера по индексам без доп. аллокаций
+        self.pattern_buffer
+            .as_mut_slice()
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, point)| {
+                let x = i as f64 * step;
+                let mut total_amplitude = 0.0;
+                let mut total_phase = 0.0;
+                for s in states {
+                    let contrib = InterferenceEngine::calculate_state_contribution_fast(s.amplitude, s.phase, x);
+                    total_amplitude += contrib.0;
+                    total_phase += contrib.1;
+                }
+                total_amplitude *= (-x * decay).exp();
+                *point = InterferencePoint { position: x, amplitude: total_amplitude, phase: total_phase };
+            });
+        // Кэшируем и возвращаем копию буфера
+        {
+            let mut cache = self.cache.write();
+            cache.insert(cache_key, self.pattern_buffer.clone());
+        }
+        self.pattern_buffer.clone()
+    }
+
+    /// Быстрый расчёт интерференции из пар (amplitude, phase) с кэшированием
+    pub fn calculate_interference_from_pairs_inplace(&mut self, pairs: &[(f64,f64)]) -> Vec<InterferencePoint> {
+        // Кэш-ключ по числовым параметрам
+        let mut hasher = Sha256::new();
+        hasher.update((pairs.len() as u64).to_le_bytes());
+        for (a,p) in pairs {
+            hasher.update(a.to_le_bytes());
+            hasher.update(p.to_le_bytes());
+        }
+        hasher.update((self.resolution as u64).to_le_bytes());
+        hasher.update(self.decay_factor.to_le_bytes());
+        hasher.update(self.threshold.to_le_bytes());
+        let cache_key = format!("{:x}", hasher.finalize());
+
+        {
+            let cache = self.cache.read();
+            if let Some(cached) = cache.get(&cache_key) { return cached.clone(); }
+        }
+
+        let res = self.resolution;
+        if self.pattern_buffer.len() != res {
+            self.pattern_buffer.resize(res, InterferencePoint{ position:0.0, amplitude:0.0, phase:0.0 });
+        }
+        let step = 1.0 / self.resolution as f64;
+        let decay = self.decay_factor;
+        let total_amp_sum: f64 = pairs.iter().map(|(a,_)| *a).sum();
+        self.pattern_buffer
+            .as_mut_slice()
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, pt)| {
+                let x = i as f64 * step;
+                let (amp, ph_sum) = sum_cos_pairs(pairs, x, decay, total_amp_sum);
+                *pt = InterferencePoint { position: x, amplitude: amp, phase: ph_sum };
+            });
+        {
+            let mut cache = self.cache.write();
+            cache.insert(cache_key, self.pattern_buffer.clone());
+        }
+        self.pattern_buffer.clone()
+    }
     
-    fn calculate_state_contribution_fast(&self, amplitude: f64, phase: f64, x: f64) -> (f64, f64) {
+    fn calculate_state_contribution_fast(amplitude: f64, phase: f64, x: f64) -> (f64, f64) {
         // Optimized version with pre-calculated values
         let pi_2 = 2.0 * std::f64::consts::PI;
         let phase_x = pi_2 * x + phase;
@@ -163,10 +296,17 @@ impl InterferenceEngine {
     }
 
     fn generate_cache_key(&self, states: &[QuantumState]) -> String {
-        // New protected key: serialization + SHA256
-        let json = serde_json::to_string(states).unwrap();
+        // Быстрый кэш-ключ без сериализации JSON: хешируем количество и пары (amplitude, phase)
         let mut hasher = Sha256::new();
-        hasher.update(json.as_bytes());
+        hasher.update((states.len() as u64).to_le_bytes());
+        for s in states {
+            hasher.update(s.amplitude.to_le_bytes());
+            hasher.update(s.phase.to_le_bytes());
+        }
+        // Также включаем resolution/decay_factor/threshold, чтобы кэш учитывать параметры движка
+        hasher.update((self.resolution as u64).to_le_bytes());
+        hasher.update(self.decay_factor.to_le_bytes());
+        hasher.update(self.threshold.to_le_bytes());
         format!("{:x}", hasher.finalize())
     }
     
@@ -239,11 +379,11 @@ impl InterferenceEngine {
         {
             match OpenClAccelerator::new() {
                 Ok(acc) => {
-                    println!("🚀 Using OpenCL acceleration");
+                    println!("Using OpenCL acceleration");
                     return acc.calculate(states, self.resolution);
                 }
                 Err(e) => {
-                    println!("⚠️  OpenCL initialization failed: {}, falling back to CPU", e);
+                    println!("OpenCL initialization failed: {}, falling back to CPU", e);
                 }
             }
         }

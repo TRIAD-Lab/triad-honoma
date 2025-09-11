@@ -2,13 +2,15 @@
 //! Efficient message propagation with exponential spread
 
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime};
 use serde::{Serialize, Deserialize};
 use rand::Rng;
+use dashmap::{DashMap, DashSet};
+use parking_lot::Mutex;
 
 use crate::network::error::NetworkError;
 use crate::network::types::{NetworkEvent, PeerInfo};
@@ -98,10 +100,10 @@ pub struct GossipService {
     event_sender: mpsc::Sender<NetworkEvent>,
     /// Peer manager
     peer_manager: Arc<RwLock<PeerManager>>,
-    /// Message cache for deduplication
-    message_cache: Arc<RwLock<HashMap<Uuid, CachedMessage>>>,
-    /// Topic subscriptions
-    subscriptions: Arc<RwLock<HashSet<String>>>,
+    /// Message cache for deduplication (lock-free reads)
+    message_cache: Arc<DashMap<Uuid, CachedMessage>>,
+    /// Topic subscriptions (lock-free reads)
+    subscriptions: Arc<DashSet<String>>,
     /// Gossip statistics
     stats: Arc<Mutex<GossipStats>>,
     /// Running flag
@@ -149,8 +151,8 @@ impl GossipService {
             config,
             event_sender,
             peer_manager,
-            message_cache: Arc::new(RwLock::new(HashMap::new())),
-            subscriptions: Arc::new(RwLock::new(HashSet::new())),
+            message_cache: Arc::new(DashMap::new()),
+            subscriptions: Arc::new(DashSet::new()),
             stats: Arc::new(Mutex::new(GossipStats::default())),
             running: false,
         }
@@ -188,10 +190,10 @@ impl GossipService {
         info!("🛑 Stopping gossip service...");
         
         // Clear message cache
-        self.message_cache.write().await.clear();
+        self.message_cache.clear();
         
         // Clear subscriptions
-        self.subscriptions.write().await.clear();
+        self.subscriptions.clear();
         
         self.running = false;
         info!("✅ Gossip service stopped");
@@ -257,7 +259,7 @@ impl GossipService {
         
         // Update statistics
         {
-            let mut stats = self.stats.lock().await;
+            let mut stats = self.stats.lock();
             stats.messages_received += 1;
         }
         
@@ -316,7 +318,7 @@ impl GossipService {
         
         // Update statistics
         {
-            let mut stats = self.stats.lock().await;
+            let mut stats = self.stats.lock();
             stats.messages_forwarded += 1;
         }
         
@@ -357,46 +359,17 @@ impl GossipService {
     
     /// Caches message for deduplication
     async fn cache_message(&self, message: &GossipMessage) {
-        let mut cache = self.message_cache.write().await;
-        
         let cached_message = CachedMessage {
             message: message.clone(),
             cached_at: Instant::now(),
             seen_by: HashSet::new(),
         };
-        
-        cache.insert(message.id, cached_message);
-        
-        // Limit cache size
-        if cache.len() > 10000 {
-            // Create a temporary copy of the data we need
-            let mut temp_entries: Vec<_> = cache.iter()
-                .map(|(id, cached)| (*id, cached.cached_at))
-                .collect();
-            
-            // Sort by timestamp
-            temp_entries.sort_by_key(|(_, timestamp)| *timestamp);
-            
-            // Get IDs to remove
-            let to_remove = temp_entries.len() - 5000; // Keep 5000 messages
-            let ids_to_remove: Vec<_> = temp_entries.iter()
-                .take(to_remove)
-                .map(|(id, _)| *id)
-                .collect();
-            
-            // Clear temp data
-            temp_entries.clear();
-            
-            // Now we can safely modify the cache
-            for id in ids_to_remove {
-                cache.remove(&id);
-            }
-        }
+        self.message_cache.insert(message.id, cached_message);
     }
     
     /// Checks if message has been seen
     async fn is_message_seen(&self, message_id: &Uuid) -> bool {
-        self.message_cache.read().await.contains_key(message_id)
+        self.message_cache.contains_key(message_id)
     }
     
     /// Validates message
@@ -487,15 +460,9 @@ impl GossipService {
             loop {
                 interval.tick().await;
                 
-                let mut cache = message_cache.write().await;
                 let now = Instant::now();
-                
-                // Remove expired messages
-                cache.retain(|_, cached| {
-                    now.duration_since(cached.cached_at) < config.message_cache_ttl
-                });
-                
-                debug!("🧹 Cache cleanup: {} messages remaining", cache.len());
+                message_cache.retain(|_, cached| now.duration_since(cached.cached_at) < config.message_cache_ttl);
+                debug!("🧹 Cache cleanup: {} messages remaining", message_cache.len());
             }
         });
         
@@ -531,7 +498,7 @@ impl GossipService {
             loop {
                 interval.tick().await;
                 
-                let stats_guard = stats.lock().await;
+                let stats_guard = stats.lock();
                 info!("📊 Gossip Stats: {} received, {} forwarded, {} dropped, {:.2}% cache hit", 
                     stats_guard.messages_received,
                     stats_guard.messages_forwarded,
@@ -546,29 +513,21 @@ impl GossipService {
     
     /// Subscribes to a topic
     pub async fn subscribe(&self, topic: String) -> Result<(), NetworkError> {
-        let mut subscriptions = self.subscriptions.write().await;
-        subscriptions.insert(topic.clone());
-        
+        self.subscriptions.insert(topic.clone());
         info!("📡 Subscribed to gossip topic: {}", topic);
         Ok(())
     }
     
     /// Unsubscribes from a topic
     pub async fn unsubscribe(&self, topic: &str) -> Result<(), NetworkError> {
-        let mut subscriptions = self.subscriptions.write().await;
-        subscriptions.remove(topic);
-        
+        self.subscriptions.remove(topic);
         info!("📡 Unsubscribed from gossip topic: {}", topic);
         Ok(())
     }
     
     /// Gets gossip statistics
-    pub async fn get_stats(&self) -> GossipStats {
-        self.stats.lock().await.clone()
-    }
+    pub async fn get_stats(&self) -> GossipStats { self.stats.lock().clone() }
     
     /// Gets active topics
-    pub async fn get_active_topics(&self) -> Vec<String> {
-        self.subscriptions.read().await.iter().cloned().collect()
-    }
+    pub async fn get_active_topics(&self) -> Vec<String> { self.subscriptions.iter().map(|s| s.clone()).collect() }
 }

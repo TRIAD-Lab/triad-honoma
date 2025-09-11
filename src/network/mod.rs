@@ -26,9 +26,9 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 use log::{debug, error, info};
-use std::time::SystemTime;
+use std::time::{SystemTime, Duration, UNIX_EPOCH};
 use crate::transaction::{Transaction, SmartContract};
-use crate::quantum::consensus::{ConsensusMessage, ConsensusState};
+use crate::quantum::consensus::{ConsensusMessage, ConsensusState, ConsensusNode};
 use crate::sharding::ShardEvent;
 use crate::error_analysis::ErrorContext;
 use crate::semantic::SemanticAction;
@@ -55,6 +55,34 @@ pub struct Network {
     event_sender: mpsc::Sender<NetworkEvent>,
     /// Message handler
     handler: Arc<RwLock<Box<dyn MessageHandler + Send + Sync>>>,
+}
+
+/// Упрощённый конструктор сети с глобальным QuantumNetworkHandler и единым StateView.
+/// Используйте этот путь, если требуется гарантированно глобальное состояние TVM/пайплайна для узла.
+pub async fn new_with_global_quantum_handler(
+    node_id: Uuid,
+    node_name: String,
+    port: u16,
+    consensus_node: Arc<RwLock<ConsensusNode>>,
+) -> Result<Network, NetworkError> {
+    // QuantumNetworkHandler использует parking_lot::Mutex<ConsensusNode>.
+    // Здесь извлекаем snapshot и переносим его под parking_lot::Mutex.
+    let consensus_snapshot = {
+        let mut guard = consensus_node.write().await;
+        (*guard).clone()
+    };
+    let consensus_arc: Arc<parking_lot::Mutex<ConsensusNode>> = Arc::new(parking_lot::Mutex::new(consensus_snapshot));
+
+    let handler: Box<dyn MessageHandler + Send + Sync> = crate::network::quantum_handler::build_global_quantum_handler(
+        node_id,
+        consensus_arc,
+    );
+
+    let mut net = Network::new(node_id, node_name, port, handler).await?;
+    // Start decentralized resonance sync broadcaster (every 5s)
+    let ms = net.message_service();
+    start_resonance_sync_task(ms, Arc::clone(&consensus_node));
+    Ok(net)
 }
 
 impl Network {
@@ -102,6 +130,8 @@ impl Network {
             handler: Arc::new(RwLock::new(handler)),
         })
     }
+    /// Returns a clone of the message service Arc for broadcasting
+    pub fn message_service(&self) -> Arc<MessageService> { Arc::clone(&self.message_service) }
     
     /// Starts the network module
     pub async fn start(&mut self) -> Result<(), NetworkError> {
@@ -213,6 +243,8 @@ pub enum MessageType {
     ErrorEvent(ErrorContext),
     SemanticAction(SemanticAction),
     Error(String),
+    ResonanceMetrics { amp: f64, ts: u64 },
+    IsolationNotice { reason: String },
 }
 
 #[derive(Debug, Clone)]
@@ -285,4 +317,23 @@ impl NetworkNode {
             _ => {}
         }
     }
-} 
+}
+
+/// Starts a background task that periodically broadcasts resonance metrics over the message service.
+/// Metrics are computed from the current node's quantum field via the consensus node engine.
+pub fn start_resonance_sync_task(message_service: std::sync::Arc<MessageService>, consensus_node: std::sync::Arc<RwLock<ConsensusNode>>) {
+    tokio::spawn(async move {
+        loop {
+            let (amp, ts) = {
+                let mut cons = consensus_node.write().await; // write lock required for &mut engine
+                let waves = cons.field.snapshot_waves();
+                let pattern = cons.engine.calculate_interference_from_waves_inplace(&waves);
+                let analysis = cons.engine.analyze_interference(&pattern);
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs();
+                (analysis.average_amplitude, now)
+            };
+            let _ = message_service.broadcast(MessageType::ResonanceMetrics { amp, ts }, Vec::new()).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
+}

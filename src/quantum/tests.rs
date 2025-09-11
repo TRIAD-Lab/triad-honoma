@@ -8,6 +8,7 @@ mod tests {
     use crate::sharding::assign_shard;
     use std::time::Instant;
     use num_complex;
+    use bytes::Bytes;
 
     #[test]
     fn test_quantum_vs_classical_blockchain() {
@@ -28,16 +29,22 @@ mod tests {
         // Измеряем время достижения консенсуса в квантово-вдохновленной модели
         let quantum_start = Instant::now();
         
-        // Первый узел отправляет сообщение
+        // Первый узел отправляет сообщение (подпишем содержимое ключом узла 0)
+        let raw = Bytes::from(test_data.clone());
+        let signature = {
+            let sk = &nodes[0].secret_key;
+            sk.sign(raw.as_ref()).to_bytes().to_vec()
+        };
         let message = ConsensusMessage {
             sender_id: "node0".to_string(),
             state_id: state_id.clone(),
-            raw_data: test_data.clone(),
+            raw_data: raw.clone(),
+            signature,
         };
         
         // Обрабатываем сообщение на всех узлах
         for node in &mut nodes {
-            node.process_message(message.clone()).unwrap();
+            node.process_message(message.clone(), &nodes[0].public_key).unwrap();
         }
         
         // Проверяем интерференцию на всех узлах
@@ -237,14 +244,20 @@ mod tests {
         let state_id = "test_state".to_string();
 
         // Узел 1 отправляет сообщение узлу 2
+        let raw = Bytes::from(test_data.clone());
+        let signature = {
+            let sk = &node1.secret_key;
+            sk.sign(raw.as_ref()).to_bytes().to_vec()
+        };
         let message = ConsensusMessage {
             sender_id: "node1".to_string(),
             state_id: state_id.clone(),
-            raw_data: test_data.clone(),
+            raw_data: raw,
+            signature,
         };
 
         // Узел 2 обрабатывает сообщение
-        let processed_state = node2.process_message(message).unwrap();
+        let processed_state = node2.process_message(message, &node1.public_key).unwrap();
 
         // Проверяем, что состояние было обработано
         assert_eq!(processed_state.superposition[0].value, test_data);

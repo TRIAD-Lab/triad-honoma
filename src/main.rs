@@ -19,6 +19,7 @@ use tokio::time::sleep;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use futures::future::join_all;
+use bytes::Bytes;
 
 const NODES: usize = 8;
 const SIM_DURATION: u64 = 20; // секунд
@@ -219,7 +220,7 @@ async fn scenario_simple_tx(nodes: Arc<Mutex<Vec<SimNode>>>, metrics: Arc<Mutex<
     let consensus_msg = ConsensusMessage {
         sender_id: sender_id.clone(),
         state_id: tx.id.to_string(),
-        raw_data: vec![],
+        raw_data: Bytes::new(),
         signature: vec![], // Добавляем пустую подпись для демо
     };
     let mut agree = 0;
@@ -387,7 +388,7 @@ async fn main() {
         let consensus = ConsensusNode::new(id.clone(), 0);
         let shard = Shard::new(0, vec![]);
         let tx_processor = QuantumTransactionProcessor::new(0.0, 1000.0);
-        let token = TrdToken::new(1000.0);
+        let token = TrdToken::new("TRD", 6);
         let error_ai = ErrorAI::new();
         let semantic = SemanticEngine::new(SystemGoal::QuantumConsensus {
             target_tps: 1000,
@@ -424,10 +425,13 @@ async fn main() {
     // });
     println!("[DEBUG] after progress_handle spawn, before while loop");
     println!("[DEBUG] before metrics.lock in while");
-    let m = metrics.lock().await;
-    println!("[DEBUG] after metrics.lock in while: total_tx={}, failed_tx={}, TARGET_TX={}", m.total_tx, m.failed_tx, TARGET_TX);
-    let mut rng = StdRng::from_entropy();
-    while m.total_tx + m.failed_tx < TARGET_TX {
+    loop {
+        let (total_done, total_tx, failed_tx) = {
+            let m = metrics.lock().await;
+            (m.total_tx + m.failed_tx >= TARGET_TX, m.total_tx, m.failed_tx)
+        };
+        println!("[DEBUG] after metrics.lock in while: total_tx={}, failed_tx={}, TARGET_TX={}", total_tx, failed_tx, TARGET_TX);
+        if total_done { break; }
         println!("[DEBUG] entered while loop");
         let nodes = Arc::clone(&nodes);
         let metrics = Arc::clone(&metrics);

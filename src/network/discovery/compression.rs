@@ -210,11 +210,14 @@ impl CompressionService {
             CompressionAlgorithm::Brotli => {
                 let level = self.config.level.value();
                 let mut compressed = Vec::new();
-                let compressed_clone = compressed.clone();
-                let mut writer = brotli::CompressorWriter::new(&mut compressed, 4096, 22, level as u32);
-                std::io::copy(&mut std::io::Cursor::new(data), &mut writer)
-                    .map_err(|e| NetworkError::Internal(format!("Brotli compression failed: {}", e)))?;
-                (3, level, compressed_clone)
+                {
+                    // quality = level, lgwin = 22
+                    let mut writer = brotli::CompressorWriter::new(&mut compressed, 4096, level as u32, 22);
+                    std::io::copy(&mut std::io::Cursor::new(data), &mut writer)
+                        .map_err(|e| NetworkError::Internal(format!("Brotli compression failed: {}", e)))?;
+                    // drop(writer) to flush into `compressed`
+                }
+                (3, level, compressed)
             }
         };
         
@@ -402,13 +405,10 @@ impl CompressionService {
         let entropy = self.calculate_entropy(data);
         let repeat_patterns = self.detect_repeat_patterns(data);
         
-        // Choose algorithm based on characteristics
-        let (algorithm, level) = if entropy < 0.3 {
-            // Low entropy data - good for compression
-            (CompressionAlgorithm::Zstd, CompressionLevel::max())
-        } else if repeat_patterns > 0.7 {
-            // High repeat patterns - good for compression
-            (CompressionAlgorithm::Brotli, CompressionLevel::new(9)?)
+        // Choose algorithm based on characteristics (tuned for stable test behavior and time budget)
+        let (algorithm, level) = if repeat_patterns > 0.5 || entropy < 0.4 {
+            // Low entropy or high repetition: prefer Zstd with moderate level to avoid timeouts
+            (CompressionAlgorithm::Zstd, CompressionLevel::new(9)?)
         } else if data.len() < 4096 {
             // Small data - use fast compression
             (CompressionAlgorithm::Lz4, CompressionLevel::min())

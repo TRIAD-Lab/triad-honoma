@@ -5,6 +5,8 @@ use uuid::Uuid;
 use log::{error, warn, info};
 use crate::transaction::{Transaction, TransactionStatus};
 use crate::quantum::field::QuantumState;
+use crate::quantum::consensus::ConsensusNode;
+use crate::quantum::field::WaveValidationResult;
 use smartcore::ensemble::random_forest_classifier::RandomForestClassifier;
 use smartcore::ensemble::random_forest_classifier::RandomForestClassifierParameters;
 use smartcore::linalg::basic::matrix::DenseMatrix;
@@ -17,6 +19,50 @@ pub enum ErrorSeverity {
     Medium,
     High,
     Critical,
+}
+
+/// Decentralized wavefield regeneration based on trusted scores per wave.
+/// This function amplifies trusted waves and extends their lifetime via existing
+/// WaveValidationResult mapping semantics (Validated/PartiallyValidated).
+///
+/// Inputs:
+/// - consensus: mutable reference to the local consensus node (holds the wave field and engine)
+/// - trust_map: map wave_id -> trust score in [0,1]
+///
+/// Behavior:
+/// - trust >= 0.6 => Validated(trust) which amplifies wave and sets lifetime to 600s
+/// - 0.3 <= trust < 0.6 => PartiallyValidated(trust*0.5) which attenuates less and sets 300s
+/// - trust < 0.3 => ignored (no change)
+///
+/// Returns number of waves updated.
+pub fn regenerate_wavefield(consensus: &mut ConsensusNode, trust_map: &std::collections::HashMap<String, f64>) -> usize {
+    // Snapshot current waves to build a result map without holding inner locks too long
+    let waves = consensus.field.snapshot_waves();
+    if waves.is_empty() { return 0; }
+
+    let mut updates: std::collections::HashMap<std::sync::Arc<str>, WaveValidationResult> =
+        std::collections::HashMap::with_capacity(waves.len());
+
+    for w in &waves {
+        if let Some(score) = trust_map.get(&w.id.to_string()).copied() {
+            let s = score.clamp(0.0, 1.0);
+            if s >= 0.6 {
+                updates.insert(std::sync::Arc::clone(&w.id), WaveValidationResult::Validated(s));
+            } else if s >= 0.3 {
+                updates.insert(std::sync::Arc::clone(&w.id), WaveValidationResult::PartiallyValidated(s * 0.5));
+            }
+        }
+    }
+
+    if updates.is_empty() { return 0; }
+
+    // Apply amplitude/lifetime changes atomically for the batch
+    consensus.field.update_wave_amplitudes(&updates);
+    // Cleanup invalidated/extinguished waves after regeneration
+    consensus.field.remove_extinguished_waves();
+    consensus.field.cleanup_expired_waves();
+
+    updates.len()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

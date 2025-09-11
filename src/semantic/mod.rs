@@ -223,7 +223,7 @@ impl SemanticEngine {
                 self.current_state.metrics.insert("load_balance".to_string(), 0.0);
                 self.current_state.metrics.insert("sync_speed".to_string(), 0.0);
             },
-            SystemGoal::NetworkEfficiency { target_latency, bandwidth_usage, node_connectivity } => {
+            SystemGoal::NetworkEfficiency { target_latency: _, bandwidth_usage: _, node_connectivity: _ } => {
                 self.current_state.metrics.insert("latency".to_string(), 0.0);
                 self.current_state.metrics.insert("bandwidth_usage".to_string(), 0.0);
                 self.current_state.metrics.insert("node_connectivity".to_string(), 0.0);
@@ -323,7 +323,7 @@ impl SemanticEngine {
 
     pub fn analyze_transaction_error(&mut self, transaction: &Transaction, error_context: &ErrorContext) -> SemanticAction {
         // Create semantic context for transaction
-        let context = SemanticContext::TransactionContext {
+        let _context = SemanticContext::TransactionContext {
             transaction: transaction.clone(),
             quantum_state: None, // Will be filled later
             error_context: Some(error_context.clone()),
@@ -369,7 +369,7 @@ impl SemanticEngine {
     pub fn analyze_quantum_state(&mut self, state: &QuantumState) -> Option<SemanticAction> {
         // Check quantum state for anomalies
         if state.amplitude < 0.5 {
-            let context = SemanticContext::QuantumContext {
+            let _context = SemanticContext::QuantumContext {
                 state: QuantumState {
                     id: "anomaly_state".to_string(),
                     shard_id: "0".to_string(),

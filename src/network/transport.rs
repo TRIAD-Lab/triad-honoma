@@ -204,9 +204,12 @@ impl TransportService {
         // Получаем отправитель сообщений для узла или создаём новое соединение
         let sender = self.get_or_create_connection(peer_id).await?;
         
-        // Отправляем сообщение через канал
-        if let Err(_) = sender.send(message.clone()).await {
-            error!("Ошибка отправки сообщения через канал узлу {}", peer_id);
+        // Сохраняем нужные поля для логирования до перемещения message
+        let msg_type = message.message_type.clone();
+        let msg_id = message.id;
+        
+        // Отправляем сообщение через канал (передаём владение без clone)
+        if let Err(_) = sender.send(message).await {
             return Err(NetworkError::ConnectionFailed(format!("Канал закрыт для узла {}", peer_id)));
         }
         
@@ -219,7 +222,7 @@ impl TransportService {
         }
         
         debug!("Сообщение помещено в очередь для отправки узлу {}: тип={:?}, id={}",
-            peer_id, message.message_type, message.id);
+            peer_id, msg_type, msg_id);
         
         Ok(())
     }

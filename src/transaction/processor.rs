@@ -156,20 +156,20 @@ impl QuantumTransactionProcessor {
     pub fn update_wave_states(
         &self,
         validation_results: &[TransactionResult],
-        consensus_nodes: &mut [ConsensusNode]
+        _consensus_nodes: &mut [ConsensusNode]
     ) -> Result<(), String> {
         let mut field = QUANTUM_FIELD.lock().unwrap();
         
         for result in validation_results {
             match result {
-                TransactionResult::Success { transaction_id, quantum_amplitude, .. } => {
+                TransactionResult::Success { transaction_id, quantum_amplitude: _, .. } => {
                     // Находим волну и усиливаем её
                     if let Some(wave) = field.active_waves.get_mut(&transaction_id.to_string()) {
                         wave.amplitude *= 1.5;
                         wave.lifetime = std::time::Duration::from_secs(600);
                     }
                 },
-                TransactionResult::PartialSuccess { transaction_id, quantum_amplitude, .. } => {
+                TransactionResult::PartialSuccess { transaction_id, quantum_amplitude: _, .. } => {
                     // Частично ослабляем волну
                     if let Some(wave) = field.active_waves.get_mut(&transaction_id.to_string()) {
                         wave.amplitude *= 0.7;
@@ -260,8 +260,8 @@ impl QuantumTransactionProcessor {
 
     // Удалена старая BLS-агрегация подписей. Для Ed25519 можно реализовать батч-верификацию на уровне волн/сообщений.
 
-    pub fn generate_zk_proof(&self, tx: &Transaction) -> Result<Vec<u8>, String> {
-        // Заглушка для ZK-доказательства
+    pub fn generate_zk_proof(&self, _tx: &Transaction) -> Result<Vec<u8>, String> {
+        // TODO: Реализовать генерацию ZK-доказательства
         Ok(vec![])
     }
 }
@@ -297,7 +297,7 @@ impl TransactionProcessor for QuantumTransactionProcessor {
         {
             let mut field = QUANTUM_FIELD.lock().unwrap();
             for wave in &waves {
-                field.add_wave(wave.id.clone(), wave.clone());
+                field.add_wave(wave.id.to_string(), wave.clone());
             }
         }
         
@@ -529,13 +529,13 @@ impl TransactionProcessor for QuantumTransactionProcessor {
         // Добавляем в поле
         {
             let mut field = QUANTUM_FIELD.lock().unwrap();
-            field.add_wave(wave.id.clone(), wave.clone());
+            field.add_wave(wave.id.to_string(), wave.clone());
         }
         
         // Получаем ВСЕ активные волны из поля
         let all_waves: Vec<QuantumWave> = {
             let field = QUANTUM_FIELD.lock().unwrap();
-            field.active_waves.values().cloned().collect()
+            field.snapshot_waves()
         };
         
         if all_waves.len() < 2 {

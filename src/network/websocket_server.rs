@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use log::{info, error, debug, trace};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use rand::Rng;
 use rayon::prelude::*;
 
@@ -62,10 +62,8 @@ pub struct GPUContext {
 
 impl WebSocketServer {
     pub fn new(node_id: String, port: u16, shard_id: usize) -> Result<Self, String> {
-        let node_id_clone = node_id.clone();
-        
         Ok(Self {
-            node_id: node_id_clone,
+            node_id,
             port,
             shard_id,
             quantum_field: Arc::new(Mutex::new(QuantumField::new())),
@@ -269,13 +267,13 @@ impl WebSocketServer {
             .collect();
         waves_count = waves.len();
         t_collect_ms = t0.elapsed().as_millis();
-        
+
         if !waves.is_empty() {
             // ФАЗА 2: Расчет квантовой интерференции - ОПТИМИЗИРОВАННАЯ
             let t1 = std::time::Instant::now();
             let (interference_valid, analysis) = {
-                let mut field = self.quantum_field.lock().unwrap();
-                
+                let mut field = self.quantum_field.lock();
+
                 // ОПТИМИЗАЦИЯ: Добавляем волны батчами для ускорения
                 let batch_size = 1000;
                 for (batch_idx, wave_batch) in waves.chunks(batch_size).enumerate() {
@@ -283,15 +281,15 @@ impl WebSocketServer {
                         field.add_wave(format!("ws-batch-{}-{}", batch_idx, index), wave.clone());
                     }
                 }
-                
-                let mut engine = self.interference_engine.lock().unwrap();
-                
+
+                let mut engine = self.interference_engine.lock();
+
                 // ОПТИМИЗАЦИЯ: Используем OpenCL если доступен
                 let pattern = if cfg!(feature = "opencl") {
                     // Создаем QuantumState из QuantumWave
                     let quantum_states: Vec<_> = waves.iter().map(|w| {
                         crate::quantum::field::QuantumState::new(
-                            w.id.clone(),
+                            w.id.to_string(),
                             w.amplitude,
                             w.phase,
                             w.shard_id.clone(),

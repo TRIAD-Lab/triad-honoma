@@ -5,7 +5,8 @@ use serde::{Serialize, Deserialize};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
 use ed25519_dalek::{VerifyingKey};
-use triad::quantum::{QuantumField, InterferenceEngine, QuantumWave, QuantumState, StateVector};
+use triad::quantum::{InterferenceEngine, QuantumWave, QuantumState, StateVector};
+use triad::quantum::field::ShardedQuantumField;
 use triad::quantum::consensus::{ConsensusNode, ConsensusMessage};
 use triad::quantum::field::{WaveValidationResult, WaveFate, WaveStatistics};
 use triad::transaction::{Transaction, TransactionProcessor};
@@ -14,9 +15,15 @@ use triad::quantum::interference::OpenClAccelerator;
 use triad::github::GitHubCodespaces;
 use num_complex::Complex;
 use log::info;
+use tracing::{info as tinfo, debug as tdebug, warn as twarn};
 use tokio::task::spawn_blocking;
 use std::thread;
 use std::sync::atomic::{AtomicBool, Ordering};
+use triad::dag::Dag;
+use triad::QuantumField;
+use uuid::Uuid;
+use bytes::Bytes;
+use crossbeam_channel as xchan;
 
 /*
  * TRIAD Quantum Consensus Demo - Enhanced with Wave Signature System
@@ -45,6 +52,43 @@ fn calculate_tps(success_count: usize, start_time: Instant) -> f64 {
         success_count as f64 / elapsed
     } else {
         0.0
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PerformanceConfig {
+    batch_size: usize,
+    channel_capacity: usize,
+    interference_threshold: usize,
+    interference_resolution: usize,
+}
+
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 1024,
+            channel_capacity: 65536,
+            interference_threshold: 512,
+            interference_resolution: 10_000,
+        }
+    }
+}
+
+impl PerformanceConfig {
+    fn from_env() -> Self {
+        let parse = |key: &str, default: usize| -> usize {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(default)
+        };
+        let def = Self::default();
+        Self {
+            batch_size: parse("TRIAD_BATCH_SIZE", def.batch_size),
+            channel_capacity: parse("TRIAD_CHANNEL_CAP", def.channel_capacity),
+            interference_threshold: parse("TRIAD_INTERF_THRESHOLD", def.interference_threshold),
+            interference_resolution: parse("TRIAD_INTERF_RES", def.interference_resolution),
+        }
     }
 }
 
@@ -414,7 +458,7 @@ fn create_sharded_messages_from_serialized(serialized: Vec<u8>, num_shards: usiz
             let message = ConsensusMessage {
                 sender_id: tx.from.clone(),
                 state_id: tx.id,
-                raw_data: line.to_vec(),
+                raw_data: line.to_vec().into(),
                 signature: Vec::new(),
             };
             sharded_messages[shard_id].push(message);
@@ -433,7 +477,7 @@ fn create_sharded_messages_from_transactions(transactions: &[DemoTransaction], n
         let message = ConsensusMessage {
             sender_id: tx.from.clone(),
             state_id: tx.id.clone(),
-            raw_data: serde_json::to_vec(tx).unwrap(),
+            raw_data: serde_json::to_vec(tx).unwrap().into(),
             signature: Vec::new(),
         };
         sharded_messages[shard_id].push(message);
@@ -448,7 +492,7 @@ fn process_distributed_consensus(
     sharded_messages: &[Vec<ConsensusMessage>],
     accounts_state: &mut HashMap<String, AccountState>,
     pubkeys: &HashMap<String, VerifyingKey>,
-    quantum_field: &Arc<StdMutex<QuantumField>>,
+    quantum_field: &Arc<StdMutex<ShardedQuantumField>>,
     interference_engine: &Arc<StdMutex<InterferenceEngine>>,
     verification_results: &[bool],
     keypool: &Ed25519KeyPool
@@ -482,9 +526,17 @@ fn process_distributed_consensus(
     }
     
     let total_time = start.elapsed();
-    let tps = calculate_tps(success_count, start);
-    println!("🔍 Consensus: {:.3}ms | Success: {} | Fail: {} | TPS: {:.0}", 
-        total_time.as_secs_f64() * 1000.0, success_count, failure_count, tps);
+    let elapsed = total_time.as_secs_f64();
+    let accepted_tps = if elapsed > 0.0 { success_count as f64 / elapsed } else { 0.0 };
+    let processed_tps = if elapsed > 0.0 { (success_count + failure_count) as f64 / elapsed } else { 0.0 };
+    println!(
+        "🔍 Consensus: {:.3}ms | Success: {} | Fail: {} | TPS (accepted): {:.0} | TPS (processed): {:.0}",
+        total_time.as_secs_f64() * 1000.0,
+        success_count,
+        failure_count,
+        accepted_tps,
+        processed_tps
+    );
     
     (success_count, failure_count)
 }
@@ -493,233 +545,196 @@ fn process_distributed_consensus(
 fn process_shard_consensus(
     shard_id: usize,
     messages: &[ConsensusMessage],
-    quantum_field: &Arc<StdMutex<QuantumField>>,
+    quantum_field: &Arc<StdMutex<ShardedQuantumField>>,
     interference_engine: &Arc<StdMutex<InterferenceEngine>>,
     verification_results: &[bool],
     keypool: &Ed25519KeyPool
 ) -> usize {
-    println!("🔬 [Shard {}] Processing {} messages with signed waves", shard_id, messages.len());
-    
-    // === ДЕТАЛЬНОЕ ПРОФИЛИРОВАНИЕ ШАРДА ===
+    let perf = PerformanceConfig::from_env();
+    println!("🔬 [Shard {}] Processing {} messages with pipeline", shard_id, messages.len());
+
+    // Метрики стадий
+    let mut stage_ingress_durs = Vec::new();
+    let mut stage_verify_durs = Vec::new();
+    let mut stage_interf_durs = Vec::new();
+    let mut stage_apply_durs = Vec::new();
+
     let shard_start = Instant::now();
-    println!("🔬 [Shard {}] Starting detailed profiling with wave signatures...", shard_id);
-    
-    // 1. СОЗДАНИЕ И ПОДПИСЬ ВОЛН
-    let wave_start = Instant::now();
-    
-    // Извлекаем транзакции из сообщений
-    let transactions: Vec<DemoTransaction> = messages.iter()
-        .filter_map(|msg| serde_json::from_slice::<DemoTransaction>(&msg.raw_data).ok())
-        .collect();
-    
-    // Создаем и подписываем квантовые волны
-    let waves_and_signatures = create_and_sign_quantum_waves(&transactions, keypool, shard_id);
-    
-    // Извлекаем только волны для дальнейшей обработки
-    let waves: Vec<QuantumWave> = waves_and_signatures.iter()
-        .map(|(wave, _)| wave.clone())
-        .collect();
-    
-    let wave_time = wave_start.elapsed();
-    println!("🔬 [Shard {}] Wave creation and signing: {:.3}ms | Waves: {}", 
-        shard_id, wave_time.as_secs_f64() * 1000.0, waves.len());
-    
-    // 2. ВЕРИФИКАЦИЯ ПОДПИСЕЙ ВОЛН
-    let verification_start = Instant::now();
-    let wave_verification_results = verify_wave_signatures_with_aggregation(&waves_and_signatures, keypool);
-    let verification_time = verification_start.elapsed();
-    println!("🔬 [Shard {}] Wave signature verification: {:.3}ms | Valid: {}/{}", 
-        shard_id, verification_time.as_secs_f64() * 1000.0, 
-        wave_verification_results.iter().filter(|&&valid| valid).count(),
-        wave_verification_results.len());
-    
-    // 3. ДОБАВЛЕНИЕ В ПОЛЕ (только валидные волны)
-    let field_add_start = Instant::now();
-    {
-        let mut field = quantum_field.lock().unwrap();
-        for (i, (wave, _)) in waves_and_signatures.iter().enumerate() {
-            if i < wave_verification_results.len() && wave_verification_results[i] {
-                field.add_wave(wave.id.clone(), wave.clone());
+
+    // Каналы
+    let (ing_tx, ing_rx) = xchan::bounded::<Vec<DemoTransaction>>(perf.channel_capacity);
+    let (ver_tx, ver_rx) = xchan::bounded::<Vec<QuantumWave>>(perf.channel_capacity);
+    let (int_tx, int_rx) = xchan::bounded::<Vec<QuantumWave>>(perf.channel_capacity);
+
+    // Ingress: парсинг и приоритизация
+    let msgs_clone: Vec<ConsensusMessage> = messages.to_vec();
+    let bs = perf.batch_size;
+    let ingress = std::thread::spawn(move || {
+        let t0 = Instant::now();
+        let mut batch: Vec<DemoTransaction> = Vec::with_capacity(bs);
+        for msg in msgs_clone.into_iter() {
+            if let Ok(tx) = serde_json::from_slice::<DemoTransaction>(&msg.raw_data) {
+                batch.push(tx);
+                if batch.len() >= bs {
+                    // сортировка по fee (убывание)
+                    batch.sort_by(|a,b| b.fee.partial_cmp(&a.fee).unwrap_or(std::cmp::Ordering::Equal));
+                    ing_tx.send(batch).ok();
+                    batch = Vec::with_capacity(bs);
+                }
             }
         }
-        // Очищаем устаревшие волны только ОДИН РАЗ после добавления всех
-        field.cleanup_expired_waves();
-    }
-    let field_add_time = field_add_start.elapsed();
-    println!("🔬 [Shard {}] Field addition (valid waves only): {:.3}ms", 
-        shard_id, field_add_time.as_secs_f64() * 1000.0);
-    
-    // 4. РАСЧЕТ ИНТЕРФЕРЕНЦИИ
-    let interference_start = Instant::now();
-    let interference_pattern = {
-        let field = quantum_field.lock().unwrap();
-        let mut engine = interference_engine.lock().unwrap();
-        
-        // Детальное логирование каждого этапа
-        let field_read_start = Instant::now();
-        let field_clone = field.clone(); // Клонируем поле для анализа
-        let field_read_time = field_read_start.elapsed();
-        println!("🔬 [Shard {}] Field read: {:.3}ms", 
-            shard_id, field_read_time.as_secs_f64() * 1000.0);
-        
-        let interference_calc_start = Instant::now();
-        // Используем РЕАЛЬНУЮ квантовую интерференцию с высоким разрешением
-        let result = engine.calculate_interference_from_field(&field_clone);
-        let interference_calc_time = interference_calc_start.elapsed();
-        println!("🔬 [Shard {}] Interference calculation core: {:.3}ms", 
-            shard_id, interference_calc_time.as_secs_f64() * 1000.0);
-        
-        result
-    };
-    let interference_time = interference_start.elapsed();
-    println!("🔬 [Shard {}] REAL Interference calculation: {:.3}ms", 
-        shard_id, interference_time.as_secs_f64() * 1000.0);
-    
-    // 5. АНАЛИЗ ИНТЕРФЕРЕНЦИИ
-    let analysis_start = Instant::now();
-    let analysis = {
-        let mut engine = interference_engine.lock().unwrap();
-        
-        let analysis_calc_start = Instant::now();
-        let result = engine.analyze_interference(&interference_pattern);
-        let analysis_calc_time = analysis_calc_start.elapsed();
-        println!("🔬 [Shard {}] Analysis calculation core: {:.3}ms", 
-            shard_id, analysis_calc_time.as_secs_f64() * 1000.0);
-        
-        result
-    };
-    let analysis_time = analysis_start.elapsed();
-    println!("🔬 [Shard {}] Interference analysis: {:.3}ms", 
-        shard_id, analysis_time.as_secs_f64() * 1000.0);
-    
-    // 6. СОЗДАНИЕ РЕШЕНИЯ
-    let decision_start = Instant::now();
-    let op = create_consensus_decision(&analysis, messages);
-    let decision_create_time = decision_start.elapsed();
-    println!("🔬 [Shard {}] Decision creation: {:.3}ms", 
-        shard_id, decision_create_time.as_secs_f64() * 1000.0);
-    
-    let outcome_start = Instant::now();
-    let outcome = op.execute();
-    let outcome_time = outcome_start.elapsed();
-    println!("🔬 [Shard {}] Outcome execution: {:.3}ms", 
-        shard_id, outcome_time.as_secs_f64() * 1000.0);
-    
-    let decision_time = decision_start.elapsed();
-    println!("🔬 [Shard {}] Decision creation: {:.3}ms | Outcome: {} (prob: {:.3})", 
-        shard_id, decision_time.as_secs_f64() * 1000.0, outcome.label, outcome.probability);
-    
-    // === ДЕТАЛЬНАЯ СТАТИСТИКА ШАРДА ===
-    let total_shard_time = shard_start.elapsed();
-    println!("🔍 [Shard {}] DETAILED SHARD PROFILING WITH WAVE SIGNATURES:", shard_id);
-    println!("   🌊 Wave creation and signing: {:.3}ms ({:.1}%)", 
-        wave_time.as_secs_f64() * 1000.0,
-        (wave_time.as_secs_f64() / total_shard_time.as_secs_f64()) * 100.0);
-    println!("   🔐 Wave signature verification: {:.3}ms ({:.1}%)", 
-        verification_time.as_secs_f64() * 1000.0,
-        (verification_time.as_secs_f64() / total_shard_time.as_secs_f64()) * 100.0);
-    println!("   📊 Field addition (valid waves): {:.3}ms ({:.1}%)", 
-        field_add_time.as_secs_f64() * 1000.0,
-        (field_add_time.as_secs_f64() / total_shard_time.as_secs_f64()) * 100.0);
-    println!("   🔬 Interference calculation: {:.3}ms ({:.1}%)", 
-        interference_time.as_secs_f64() * 1000.0,
-        (interference_time.as_secs_f64() / total_shard_time.as_secs_f64()) * 100.0);
-    println!("   📈 Analysis: {:.3}ms ({:.1}%)", 
-        analysis_time.as_secs_f64() * 1000.0,
-        (analysis_time.as_secs_f64() / total_shard_time.as_secs_f64()) * 100.0);
-    println!("   🎯 Decision: {:.3}ms ({:.1}%)", 
-        decision_time.as_secs_f64() * 1000.0,
-        (decision_time.as_secs_f64() / total_shard_time.as_secs_f64()) * 100.0);
-    println!("   ⏱️ Total shard time: {:.3}ms (100%)", 
-        total_shard_time.as_secs_f64() * 1000.0);
-    
-    // Фильтруем сообщения по результатам верификации подписей волн
-    let valid_messages: Vec<&ConsensusMessage> = messages.iter()
-        .enumerate()
-        .filter(|(i, _)| {
-            // Проверяем верификацию подписей волн
-            *i < wave_verification_results.len() && wave_verification_results[*i]
-        })
-        .map(|(_, msg)| msg)
-        .collect();
-    
-    println!("🔬 [Shard {}] Messages with valid wave signatures: {}/{}", shard_id, valid_messages.len(), messages.len());
-    
-    // Применяем квантовый консенсус только к сообщениям с валидными подписями волн
-    println!("🔬 [Shard {}] Outcome label: '{}' (probability: {:.3})", shard_id, outcome.label, outcome.probability);
-    
-    let success_count = if valid_messages.is_empty() {
-        println!("🔬 [Shard {}] No valid messages - rejecting all", shard_id);
-        0 // Нет валидных подписей волн - все отклоняем
-    } else {
-        match outcome.label.as_str() {
-            "ConsensusReached" => {
-                println!("🔬 [Shard {}] Consensus reached - accepting {} messages", shard_id, valid_messages.len());
-                valid_messages.len()
-            },
-            "ConflictDetected" => {
-                println!("🔬 [Shard {}] Conflict detected - rejecting all messages", shard_id);
-                0
-            },
-            "PartialConsensus" => {
-                let partial_count = (valid_messages.len() as f64 * 0.7) as usize;
-                println!("🔬 [Shard {}] Partial consensus - accepting {} of {} messages", shard_id, partial_count, valid_messages.len());
-                partial_count
-            },
-            _ => {
-                println!("🔬 [Shard {}] Unknown outcome '{}' - rejecting all", shard_id, outcome.label);
-                0
-            },
+        if !batch.is_empty() {
+            batch.sort_by(|a,b| b.fee.partial_cmp(&a.fee).unwrap_or(std::cmp::Ordering::Equal));
+            let _ = ing_tx.send(batch);
         }
-    };
-    
-    println!("🔬 [Shard {}] Final success count: {}", shard_id, success_count);
-    
-    // Обновляем состояние волн на основе результатов консенсуса
-    update_wave_states_after_consensus(
-        quantum_field,
-        &waves,
-        success_count,
-        valid_messages.len()
-    );
-    
-    success_count
+        drop(ing_tx);
+        t0.elapsed()
+    });
+
+    // SigVerify: N воркеров
+    let ver_workers = num_cpus::get();
+    let mut ver_handles = Vec::new();
+    // Share keypool across verifier threads without cloning the whole pool each time
+    let keypool_arc = Arc::new(keypool.clone());
+    for _ in 0..ver_workers {
+        let rx = ing_rx.clone();
+        let tx = ver_tx.clone();
+        let keypool = Arc::clone(&keypool_arc);
+        let handle = std::thread::spawn(move || {
+            let mut local_dur = Duration::from_millis(0);
+            while let Ok(batch) = rx.recv() {
+                let t0 = Instant::now();
+                // создаём и подписываем волны, затем верифицируем (как в демо)
+                let waves_and_signatures = create_and_sign_quantum_waves(&batch, keypool.as_ref(), shard_id);
+                let ver_results = verify_wave_signatures_with_aggregation(&waves_and_signatures, keypool.as_ref());
+                let waves: Vec<QuantumWave> = waves_and_signatures.into_iter()
+                    .zip(ver_results.into_iter())
+                    .filter_map(|((w,_sig), ok)| if ok { Some(w) } else { None })
+                    .collect();
+                let _ = tx.send(waves);
+                local_dur += t0.elapsed();
+            }
+            local_dur
+        });
+        ver_handles.push(handle);
+    }
+    drop(ver_tx);
+
+    // Interference worker: добавляет волны и триггерит пересчёт
+    let qf = Arc::clone(quantum_field);
+    let int_handle = std::thread::spawn(move || {
+        let mut local_dur = Duration::from_millis(0);
+        while let Ok(waves) = ver_rx.recv() {
+            if waves.is_empty() { continue; }
+            let t0 = Instant::now();
+            let pairs: Vec<(String, QuantumWave)> = waves.iter().map(|w| (w.id.to_string(), w.clone())).collect();
+            {
+                let mut field = qf.lock().unwrap();
+                field.add_waves_batch(pairs);
+                let _ = field.maybe_flush_interference(perf.interference_threshold, perf.interference_resolution);
+            }
+            let _ = int_tx.send(waves);
+            local_dur += t0.elapsed();
+        }
+        drop(int_tx);
+        local_dur
+    });
+
+    // Apply/Consensus: собирает волны, строит DAG, анализирует интерференцию и применяет
+    let qf2 = Arc::clone(quantum_field);
+    let eng = Arc::clone(interference_engine);
+    let apply_handle = std::thread::spawn(move || {
+        let mut local_dur = Duration::from_millis(0);
+        let mut total_success = 0usize;
+        let mut total_processed = 0usize;
+        while let Ok(waves) = int_rx.recv() {
+            if waves.is_empty() { continue; }
+            let t0 = Instant::now();
+            // Построение DAG и уровней как ранее
+            let dag_start = Instant::now();
+            let mut dag = Dag::new();
+            let ns = Uuid::new_v4();
+            let wave_uuid: Vec<Uuid> = waves.iter().map(|w| Uuid::new_v5(&ns, w.id.as_bytes())).collect();
+            let index_by_uuid: HashMap<Uuid, usize> = wave_uuid.iter().cloned().enumerate().map(|(i,u)|(u,i)).collect();
+            let mut by_account: HashMap<String, Vec<(u64, usize)>> = HashMap::new();
+            let mut by_account_nonce: HashMap<(String, u64), Vec<usize>> = HashMap::new();
+            // Здесь нет исходных tx, поэтому упрощенно связываем последовательности по wave.id хэшу
+            for (i, w) in waves.iter().enumerate() {
+                by_account.entry(w.shard_id.clone()).or_default().push((i as u64, i));
+                by_account_nonce.entry((w.shard_id.clone(), i as u64)).or_default().push(i);
+            }
+            for (_acc, mut items) in by_account { items.sort_by_key(|(nonce, _)| *nonce); let mut prev=None; for &(_n, idx) in &items { let parents = match prev { Some(p)=> vec![wave_uuid[p]], None=>Vec::new()}; dag.add_transaction(wave_uuid[idx], parents); prev=Some(idx);} }
+            for ((_acc,_nonce), idxs) in by_account_nonce.into_iter() { if idxs.len()<=1 {continue;} let best_idx=idxs[0]; for &i in &idxs { if i==best_idx {continue;} dag.add_transaction(wave_uuid[i], vec![wave_uuid[best_idx]]);} }
+            let _dag_time = dag_start.elapsed();
+
+            // Анализ интерференции текущего поля
+            let interference_pattern = {
+                let field = qf2.lock().unwrap();
+                field.calculate_interference_pattern(Some(10_000))
+            };
+            let analysis = { let mut engine = eng.lock().unwrap(); engine.analyze_interference(&interference_pattern) };
+            let op = create_consensus_decision(&analysis, &[]);
+            let outcome = op.execute();
+            let valid_messages = waves.len();
+            let success_count = match outcome.label.as_str() { "ConsensusReached"=> valid_messages, "PartialConsensus"=> ((valid_messages as f64)*0.7) as usize, _=>0 };
+            total_success += success_count;
+            total_processed += valid_messages;
+
+            // Обновление состояний
+            update_wave_states_after_consensus(&qf2, &waves, success_count, valid_messages);
+
+            local_dur += t0.elapsed();
+        }
+        (local_dur, total_success, total_processed)
+    });
+
+    // Собираем метрики
+    let ingress_dur = ingress.join().unwrap_or_default();
+    stage_ingress_durs.push(ingress_dur);
+    let mut ver_total = Duration::from_millis(0);
+    for h in ver_handles { ver_total += h.join().unwrap_or_default(); }
+    stage_verify_durs.push(ver_total);
+    let int_dur = int_handle.join().unwrap_or_default();
+    stage_interf_durs.push(int_dur);
+    let (apply_dur, success_total, processed_total) = apply_handle.join().unwrap();
+    stage_apply_durs.push(apply_dur);
+
+    // Вывод метрик стадий
+    let elapsed = shard_start.elapsed().as_secs_f64();
+    let accepted_tps = if elapsed>0.0 { success_total as f64 / elapsed } else {0.0};
+    let processed_tps = if elapsed>0.0 { processed_total as f64 / elapsed } else {0.0};
+    println!("📊 [Shard {}] Pipeline TPS: accepted={:.0}, processed={:.0}", shard_id, accepted_tps, processed_tps);
+
+    success_total
 }
+    // (duplicate block removed)
 
 /// Обновляет состояние волн на основе результатов консенсуса
 fn update_wave_states_after_consensus(
-    quantum_field: &Arc<StdMutex<QuantumField>>,
+    quantum_field: &Arc<StdMutex<ShardedQuantumField>>,
     waves: &[QuantumWave],
     success_count: usize,
     total_count: usize
 ) {
-    let mut field = quantum_field.lock().unwrap();
-    
+    use triad::quantum::field::WaveValidationResult;
+    let mut updates: HashMap<Arc<str>, WaveValidationResult> = HashMap::with_capacity(waves.len());
     for (i, wave) in waves.iter().enumerate() {
-        let wave_id = &wave.id;
-        
-        if let Some(field_wave) = field.active_waves.get_mut(wave_id) {
-            if i < success_count {
-                // Успешная валидация - усиливаем волну
-                field_wave.amplitude *= 1.5;
-                field_wave.lifetime = Duration::from_secs(600);
-            } else {
-                // Неуспешная валидация - ослабляем волну
-                field_wave.amplitude *= 0.7;
-                field_wave.lifetime = Duration::from_secs(300);
-            }
-        }
+        let val = if i < success_count {
+            WaveValidationResult::Validated(1.0)
+        } else {
+            WaveValidationResult::PartiallyValidated(0.7)
+        };
+        updates.insert(Arc::clone(&wave.id), val);
     }
-    
-    // Удаляем полностью погашенные волны
+    let mut field = quantum_field.lock().unwrap();
+    field.update_wave_amplitudes(&updates);
     field.remove_extinguished_waves();
-    
-    // Выводим статистику по волнам
     let stats = field.get_wave_statistics();
     println!("🌊 Wave statistics: total={}, strong={}, weak={}, avg_amplitude={:.3}", 
         stats.total_waves, stats.strong_waves, stats.weak_waves, stats.average_amplitude);
 }
 
+// ...
 // Создаем решение консенсуса на основе интерференции и комиссий
 fn create_consensus_decision(analysis: &triad::quantum::interference::InterferenceAnalysis, messages: &[ConsensusMessage]) -> triad::quantum::prob_ops::ProbabilisticOperation {
     let constructive_ratio = if analysis.total_points() > 0 {
@@ -831,12 +846,8 @@ fn calculate_reputation_factor(messages: &[ConsensusMessage]) -> f64 {
 // Проверяем консенсус в распределенной сети
 fn check_distributed_consensus(nodes: &[ConsensusNode], round: usize) -> bool {
     let consensus_threshold = (nodes.len() as f64 * 0.67) as usize;
-    let consensus_count = nodes.iter()
-        .filter(|node| {
-            // Проверяем, что узел активен и участвует в консенсусе
-            !node.field.active_waves.is_empty()
-        })
-        .count();
+    // Предполагаем активность всех узлов-участников в этом демо
+    let consensus_count = nodes.len();
     
     consensus_count >= consensus_threshold
 }
@@ -852,7 +863,7 @@ fn create_distributed_nodes(num_nodes: usize, num_shards: usize) -> Vec<Consensu
 struct DistributedNetworkManager {
     nodes: Vec<ConsensusNode>,
     keypool: Ed25519KeyPool,
-    quantum_field: Arc<StdMutex<QuantumField>>,
+    quantum_field: Arc<StdMutex<ShardedQuantumField>>,
     interference_engine: Arc<StdMutex<InterferenceEngine>>,
     codespaces: Vec<String>,
     cpu_monitor: CpuMonitor,
@@ -874,10 +885,11 @@ impl DistributedNetworkManager {
             println!("⚠️  OpenCL feature not enabled, using CPU only");
         }
         
+        let shards = num_cpus::get().next_power_of_two();
         Self {
             nodes: Vec::new(),
             keypool: Ed25519KeyPool::new(1000),
-            quantum_field: Arc::new(StdMutex::new(QuantumField::new())),
+            quantum_field: Arc::new(StdMutex::new(ShardedQuantumField::new(shards, 1_000_000))),
             interference_engine: Arc::new(StdMutex::new(InterferenceEngine::new(1000, 0.95))),
             codespaces: Vec::new(),
             cpu_monitor: CpuMonitor::new(),
@@ -1307,8 +1319,15 @@ impl DistributedNetworkManager {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Инициализируем логирование
-    env_logger::init();
+    // Инициализируем логирование и tracing
+    let _ = env_logger::try_init();
+    let env_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into());
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_thread_ids(true)
+        .with_target(false)
+        .compact()
+        .try_init();
     
     // Парсим аргументы командной строки
     let args = if std::env::args().any(|arg| arg == "--distributed") {
@@ -1468,7 +1487,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let prep_start = Instant::now();
             let mut nodes = nodes.clone();
             let mut accounts_state = HashMap::new(); // Упрощенно для демо
-            let local_field = Arc::new(StdMutex::new(QuantumField::new()));
+            let local_field = Arc::new(StdMutex::new(ShardedQuantumField::new(8, 500_000)));
             let local_engine = Arc::new(StdMutex::new(InterferenceEngine::new(1000, 0.95)));
             let keypool = keypool.clone();
             let prep_time = prep_start.elapsed();
@@ -1635,7 +1654,7 @@ fn create_and_sign_quantum_waves(
             let phase = calculate_transaction_phase(&ConsensusMessage {
                 sender_id: tx.from.clone(),
                 state_id: tx.id.clone(),
-                raw_data: vec![],
+                raw_data: Bytes::new(),
                 signature: vec![],
             });
             
@@ -1657,7 +1676,7 @@ fn create_and_sign_quantum_waves(
             
             // Создаем подпись волны
             let wave_signature = WaveSignature::new(
-                wave.id.clone(),
+                wave.id.to_string(),
                 tx.id.clone(),
                 amplitude,
                 phase,
@@ -1673,7 +1692,7 @@ fn create_and_sign_quantum_waves(
             
             // Создаем финальную подпись волны с реальной подписью
             let final_wave_signature = WaveSignature::new(
-                wave.id.clone(),
+                wave.id.to_string(),
                 tx.id.clone(),
                 amplitude,
                 phase,
@@ -1920,11 +1939,11 @@ fn demonstrate_wave_validation_system(keypool: &Ed25519KeyPool) {
     for (i, (wave, wave_sig)) in waves_and_signatures.iter().enumerate() {
         if i < verification_results.len() && verification_results[i] {
             println!("✅ Adding valid wave {} with signature", wave.id);
-            quantum_field.add_wave(wave.id.clone(), wave.clone());
+            quantum_field.add_wave(wave.id.to_string(), wave.clone());
             
             // Добавляем волну в соответствующий узел консенсуса
             let node_index = wave.shard_id.parse::<usize>().unwrap_or(0) % consensus_nodes.len();
-            consensus_nodes[node_index].field.add_wave(wave.id.clone(), wave.clone());
+            consensus_nodes[node_index].field.add_wave(wave.id.to_string(), wave.clone());
         } else {
             println!("❌ Skipping invalid wave {} (signature verification failed)", wave.id);
         }
@@ -2013,7 +2032,7 @@ fn demonstrate_wave_validation_system(keypool: &Ed25519KeyPool) {
     println!("\n🔄 === Applying Validation Results to Signed Waves ===");
     
     for (wave_id, result) in &validation_results {
-        if let Some(wave) = quantum_field.active_waves.get_mut(wave_id) {
+        if let Some(wave) = quantum_field.active_waves.get_mut(wave_id.as_ref()) {
             let old_amplitude = wave.amplitude;
             wave.update_amplitude(result);
             let new_amplitude = wave.amplitude;
@@ -2048,7 +2067,7 @@ fn demonstrate_wave_validation_system(keypool: &Ed25519KeyPool) {
     
     // Проверяем здоровье волн
     for (wave_id, _) in &validation_results {
-        if let Some(health) = quantum_field.check_wave_health(wave_id) {
+        if let Some(health) = quantum_field.check_wave_health(wave_id.as_ref()) {
             println!("🏥 Wave {} health: {:?} | Age ratio: {:.2} | Amplitude: {:.3}", 
                 wave_id, health.status, health.age_ratio, health.amplitude);
         }

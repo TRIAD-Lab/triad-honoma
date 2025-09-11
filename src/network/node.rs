@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::time::SystemTime;
 use serde_json;
+use bytes::Bytes;
 
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
@@ -143,9 +144,11 @@ impl NetworkNode {
                     let consensus_message = ConsensusMessage {
                         sender_id: self.config.id.clone(),
                         state_id: state_id.clone(),
-                        raw_data: transaction.data.clone(),
+                        raw_data: Bytes::from(transaction.data.clone()),
+                        signature: vec![],
                     };
-                    let _ = consensus.process_message(consensus_message);
+                    let pk = consensus.public_key.clone();
+                    let _ = consensus.process_message(consensus_message, &pk);
                     // Check interference
                     let interference_result = consensus.check_interference(&state_id).unwrap_or(false);
                     if interference_result {
@@ -203,7 +206,8 @@ impl NetworkNode {
 
     fn process_consensus_message(&mut self, message: ConsensusMessage) {
         if let Ok(mut consensus) = self.consensus.lock() {
-            consensus.process_message(message);
+            let pk = consensus.public_key.clone();
+            let _ = consensus.process_message(message, &pk);
         }
     }
 

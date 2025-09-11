@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use bytes::Bytes;
 use std::net::SocketAddr;
 use uuid::Uuid;
 use std::time::{Duration, Instant};
@@ -17,8 +18,8 @@ pub struct Message {
     pub message_type: MessageType,
     /// Message timestamp
     pub timestamp: u64,
-    /// Message payload
-    pub payload: Vec<u8>,
+    /// Message payload (zero-copy)
+    pub payload: Bytes,
 }
 
 impl Message {
@@ -27,7 +28,7 @@ impl Message {
         sender_id: Uuid,
         recipient_id: Option<Uuid>,
         message_type: MessageType,
-        payload: Vec<u8>,
+        payload: Bytes,
     ) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

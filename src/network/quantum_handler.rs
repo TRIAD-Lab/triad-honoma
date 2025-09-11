@@ -1,18 +1,21 @@
+use crate::pipeline::{Pipeline, PipelineConfig};
 use async_trait::async_trait;
 use uuid::Uuid;
 use log::{info, debug, error, warn};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use parking_lot::Mutex;
 
 use crate::network::types::{Message, PeerInfo};
 use crate::network::error::NetworkError;
 use crate::network::handler::MessageHandler;
 use crate::quantum::consensus::{ConsensusNode, ConsensusMessage};
 use crate::quantum::field::{QuantumWave, QuantumState};
+use crate::tvm::state::StateView;
 use crate::transaction::{Transaction, SmartContract};
 use crate::sharding::ShardEvent;
-use crate::error_analysis::ErrorContext;
+use crate::error_analysis::{ErrorContext, regenerate_wavefield};
 use crate::semantic::SemanticAction;
+use bytes::Bytes;
 
 /// Квантовый обработчик сетевых сообщений
 /// Интегрирует сетевой слой с квантовым консенсусом
@@ -20,30 +23,49 @@ use crate::semantic::SemanticAction;
 pub struct QuantumNetworkHandler {
     node_id: Uuid,
     consensus_node: Arc<Mutex<ConsensusNode>>,
+    state: Arc<StateView>,
     quantum_waves: Arc<Mutex<Vec<QuantumWave>>>,
     message_cache: Arc<Mutex<std::collections::HashMap<Uuid, Message>>>,
     interference_events: Arc<Mutex<Vec<NetworkInterferenceEvent>>>,
+    pipeline: Arc<Pipeline>,
+    // Isolation state: if true, this node temporarily ignores external traffic due to >1% resonance deviation
+    is_isolated: Arc<Mutex<bool>>, 
 }
 
 #[derive(Debug, Clone)]
 pub struct NetworkInterferenceEvent {
     pub timestamp: std::time::Instant,
-    pub wave_id: String,
+    pub wave_id: std::sync::Arc<str>,
     pub interference_strength: f64,
     pub affected_peers: Vec<Uuid>,
 }
 
 impl QuantumNetworkHandler {
+    /// Старый конструктор (обратная совместимость): создаёт новый StateView по умолчанию
     pub fn new(
         node_id: Uuid,
         consensus_node: Arc<Mutex<ConsensusNode>>,
     ) -> Self {
+        let state = Arc::new(StateView::new());
+        Self::new_with_state(node_id, consensus_node, state)
+    }
+
+    /// Новый конструктор: принимает глобальное состояние узла
+    pub fn new_with_state(
+        node_id: Uuid,
+        consensus_node: Arc<Mutex<ConsensusNode>>,
+        state: Arc<StateView>,
+    ) -> Self {
+        let pipe = Pipeline::new(PipelineConfig::from_env(), Arc::clone(&consensus_node), Arc::clone(&state));
         Self {
             node_id,
             consensus_node,
+            state,
             quantum_waves: Arc::new(Mutex::new(Vec::new())),
             message_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
             interference_events: Arc::new(Mutex::new(Vec::new())),
+            pipeline: Arc::new(pipe),
+            is_isolated: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -74,7 +96,7 @@ impl QuantumNetworkHandler {
         };
 
         // Подписываем волну ключом консенсус-узла
-        let mut consensus = self.consensus_node.lock().await;
+        let mut consensus = self.consensus_node.lock();
         QuantumWave::new_signed(
             wave_id,
             1.0, // амплитуда
@@ -95,7 +117,7 @@ impl QuantumNetworkHandler {
         };
 
         {
-            let mut events = self.interference_events.lock().await;
+            let mut events = self.interference_events.lock();
             events.push(interference_event.clone());
             
             // Ограничиваем количество событий
@@ -110,7 +132,7 @@ impl QuantumNetworkHandler {
 
     /// Очищает устаревшие квантовые волны
     async fn cleanup_expired_waves(&self) {
-        let mut waves = self.quantum_waves.lock().await;
+        let mut waves = self.quantum_waves.lock();
         let now = std::time::Instant::now();
         
         waves.retain(|wave| {
@@ -122,7 +144,7 @@ impl QuantumNetworkHandler {
     async fn process_cached_messages_batch(&self) {
         // Снимаем снимок кэша, чтобы минимизировать время блокировки
         let messages: Vec<Message> = {
-            let cache = self.message_cache.lock().await;
+            let cache = self.message_cache.lock();
             cache.values().cloned().collect()
         };
 
@@ -133,7 +155,7 @@ impl QuantumNetworkHandler {
 
         // Берем публик ключ локального узла (демо)
         let vk = {
-            let consensus = self.consensus_node.lock().await;
+            let consensus = self.consensus_node.lock();
             consensus.public_key.clone()
         };
 
@@ -145,11 +167,11 @@ impl QuantumNetworkHandler {
         // Подготовим ссылки для батч-верификации
         let wave_refs: Vec<(&QuantumWave, ed25519_dalek::VerifyingKey)> = items.iter().map(|(w, k)| (w, k.clone())).collect();
 
-        let mut consensus = self.consensus_node.lock().await;
+        let mut consensus = self.consensus_node.lock();
         if consensus.field.verify_waves_batch(&wave_refs) {
             // Добавляем все волны в поле
             for (wave, _k) in items.into_iter() {
-                let _ = consensus.field.add_signed_wave(wave.id.clone(), wave, &vk);
+                let _ = consensus.field.add_signed_wave(wave.id.to_string(), wave, &vk);
             }
         } else {
             warn!("Batch verification failed for {} cached messages", messages.len());
@@ -158,9 +180,9 @@ impl QuantumNetworkHandler {
 
     /// Получает статистику квантовой сети
     pub async fn get_quantum_network_stats(&self) -> QuantumNetworkStats {
-        let waves = self.quantum_waves.lock().await;
-        let events = self.interference_events.lock().await;
-        let cache = self.message_cache.lock().await;
+        let waves = self.quantum_waves.lock();
+        let events = self.interference_events.lock();
+        let cache = self.message_cache.lock();
 
         QuantumNetworkStats {
             active_waves: waves.len(),
@@ -169,6 +191,71 @@ impl QuantumNetworkHandler {
             total_wave_amplitude: waves.iter().map(|w| w.amplitude).sum(),
         }
     }
+
+    /// Computes the local average interference amplitude snapshot for resonance comparison
+    fn local_average_amplitude(&self) -> f64 {
+        let mut cons = self.consensus_node.lock();
+        let waves = cons.field.snapshot_waves();
+        if waves.is_empty() { return 0.0; }
+        let pattern = cons.engine.calculate_interference_from_waves_inplace(&waves);
+        let analysis = cons.engine.analyze_interference(&pattern);
+        analysis.average_amplitude
+    }
+
+    /// Returns true if node is currently isolated
+    fn is_currently_isolated(&self) -> bool { *self.is_isolated.lock() }
+
+    /// Set isolation state with logging
+    fn set_isolation(&self, iso: bool, reason: &str) {
+        let mut guard = self.is_isolated.lock();
+        if *guard != iso {
+            let was_iso = *guard;
+            *guard = iso;
+            if iso {
+                warn!("[Resonance] Node isolated due to: {}", reason);
+            } else {
+                info!("[Resonance] Node restored to normal operation");
+                // On recovery, trigger decentralized wavefield regeneration using recent interference events
+                self.regenerate_from_trust();
+            }
+        }
+    }
+
+    /// Builds a trust map from recent network interference events and triggers regeneration
+    fn regenerate_from_trust(&self) {
+        // Build trust scores from last up to 100 events (amplitude normalized to [0,1])
+        let events = self.interference_events.lock();
+        if events.is_empty() { return; }
+        let n = events.len();
+        let start = if n > 100 { n - 100 } else { 0 };
+        let slice = &events[start..];
+        let mut max_amp = 0.0f64;
+        for e in slice.iter() { max_amp = max_amp.max(e.interference_strength.abs()); }
+        let denom = if max_amp < 1e-12 { 1.0 } else { max_amp };
+        let mut trust: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        for e in slice.iter() {
+            let score = (e.interference_strength.abs() / denom).clamp(0.0, 1.0);
+            trust.entry(e.wave_id.to_string()).and_modify(|s| { *s = (*s + score) * 0.5; }).or_insert(score);
+        }
+        drop(events);
+
+        let updated = {
+            let mut cons = self.consensus_node.lock();
+            regenerate_wavefield(&mut *cons, &trust)
+        };
+        info!("[Regeneration] Applied wavefield regeneration updates: {} waves", updated);
+    }
+}
+
+/// Удобная фабрика для инициализации обработчика с ГЛОБАЛЬНЫМ состоянием,
+/// возвращает объект, готовый к установке в `Network::new(..., handler)`.
+pub fn build_global_quantum_handler(
+    node_id: Uuid,
+    consensus_node: Arc<Mutex<ConsensusNode>>,
+) -> Box<dyn crate::network::handler::MessageHandler + Send + Sync> {
+    let state = Arc::new(StateView::new());
+    let handler = QuantumNetworkHandler::new_with_state(node_id, consensus_node, state);
+    Box::new(handler)
 }
 
 #[derive(Debug, Clone)]
@@ -182,24 +269,11 @@ pub struct QuantumNetworkStats {
 #[async_trait]
 impl MessageHandler for QuantumNetworkHandler {
     async fn handle_message(&mut self, from: Uuid, message: Message) -> Result<(), NetworkError> {
-        info!("[QuantumNetworkHandler] Получено сообщение от {}: тип={:?}, id={}", from, message.message_type, message.id);
+        info!("[QuantumNetworkHandler] Received message from {}: type={:?}, id={}", from, message.message_type, message.id);
 
-        // Создаем квантовую волну из сообщения
-        let wave = self.create_quantum_wave_from_message(&message).await;
-        
-        // Добавляем волну в квантовое поле ТОЛЬКО после проверки подписи
+        // Кэшируем исходное сетевое сообщение (для диагностики)
         {
-            let mut consensus = self.consensus_node.lock().await;
-            let vk = consensus.public_key.clone();
-            if let Err(e) = consensus.field.add_signed_wave(wave.id.clone(), wave.clone(), &vk) {
-                error!("Отклонена волна из сообщения {}: {}", message.id, e);
-                return Err(NetworkError::Internal(e));
-            }
-        }
-
-        // Кэшируем сообщение
-        {
-            let mut cache = self.message_cache.lock().await;
+            let mut cache = self.message_cache.lock();
             cache.insert(message.id, message.clone());
             
             // Ограничиваем размер кэша
@@ -209,23 +283,53 @@ impl MessageHandler for QuantumNetworkHandler {
         }
 
         // Триггерим пакетную обработку, когда в кэше наберется минимум 16 сообщений
-        if { self.message_cache.lock().await.len() } >= 16 {
+        if { self.message_cache.lock().len() } >= 16 {
             self.process_cached_messages_batch().await;
         }
 
-        // Обрабатываем сообщение в зависимости от типа
+        // Обрабатываем сообщение в зависимости от типа: направляем в Pipeline (Ingress)
         match message.message_type {
             crate::network::MessageType::Transaction(transaction) => {
-                self.handle_transaction_message(from, transaction).await?;
+                if self.is_currently_isolated() {
+                    warn!("[Isolation] Dropping transaction from {} while isolated", from);
+                } else {
+                    self.handle_transaction_message(from, transaction).await?;
+                }
             },
             crate::network::MessageType::Consensus(consensus_msg) => {
-                self.handle_consensus_message(from, consensus_msg).await?;
+                if self.is_currently_isolated() {
+                    warn!("[Isolation] Dropping consensus message from {} while isolated", from);
+                } else {
+                    self.handle_consensus_message(from, consensus_msg).await?;
+                }
             },
             crate::network::MessageType::SmartContract(contract) => {
-                self.handle_smart_contract_message(from, contract).await?;
+                if self.is_currently_isolated() {
+                    warn!("[Isolation] Dropping smart contract from {} while isolated", from);
+                } else {
+                    self.handle_smart_contract_message(from, contract).await?;
+                }
+            },
+            // Resonance synchronization: compare peer amplitude with local, isolate if deviation > 1%
+            crate::network::MessageType::ResonanceMetrics { amp, ts: _ } => {
+                let local = self.local_average_amplitude();
+                let denom = if local.abs() < 1e-12 { 1.0 } else { local.abs() };
+                let dev = ((amp - local).abs() / denom).min(1.0);
+                if dev > 0.01 {
+                    self.set_isolation(true, &format!("resonance deviation {:.4}", dev));
+                } else {
+                    self.set_isolation(false, "within 1% deviation");
+                }
+            },
+            crate::network::MessageType::IsolationNotice { reason } => {
+                self.set_isolation(true, &format!("peer issued isolation notice: {}", reason));
             },
             crate::network::MessageType::ShardEvent(event) => {
-                self.handle_shard_event_message(from, event).await?;
+                if self.is_currently_isolated() {
+                    warn!("[Isolation] Dropping shard event from {} while isolated", from);
+                } else {
+                    self.handle_shard_event_message(from, event).await?;
+                }
             },
             crate::network::MessageType::ErrorEvent(error_ctx) => {
                 self.handle_error_event_message(from, error_ctx).await?;
@@ -234,7 +338,7 @@ impl MessageHandler for QuantumNetworkHandler {
                 self.handle_semantic_action_message(from, action).await?;
             },
             crate::network::MessageType::Error(error_str) => {
-                warn!("Получена ошибка от узла {}: {}", from, error_str);
+                warn!("Received error from {}: {}", from, error_str);
             },
         }
 
@@ -247,32 +351,17 @@ impl MessageHandler for QuantumNetworkHandler {
     async fn handle_peer_connected(&mut self, peer_info: PeerInfo) -> Result<(), NetworkError> {
         info!("[QuantumNetworkHandler] Новый peer подключен: {} ({})", peer_info.name, peer_info.id);
 
-        // Создаем ПОДПИСАННУЮ квантовую волну для нового узла
-        let wave = QuantumWave::new_signed(
-            format!("peer_connected_{}", peer_info.id),
-            1.0,
-            0.0,
-            "peer_connection".to_string(),
-            vec![crate::quantum::field::StateVector {
-                value: num_complex::Complex::new(1.0, 0.0),
-                probability: 1.0,
-            }],
-            &self.consensus_node.lock().await.secret_key,
-        );
-
-        // Добавляем в квантовое поле после проверки подписи
-        {
-            let mut consensus = self.consensus_node.lock().await;
-            let vk = consensus.public_key.clone();
-            if let Err(e) = consensus.field.add_signed_wave(wave.id.clone(), wave.clone(), &vk) {
-                error!("Отклонена волна peer_connected: {}", e);
-                return Err(NetworkError::Internal(e));
-            }
-        }
-
-        // Обрабатываем интерференцию с другими узлами
-        let peers = vec![peer_info.clone()];
-        self.process_network_interference(&wave, &peers).await;
+        // Формируем сервисное консенсус-сообщение и отправляем в pipeline
+        // PeerInfo не реализует Serialize, используем переносимый формат
+        let spi = crate::network::types::SerializablePeerInfo::from(&peer_info);
+        let payload = serde_json::to_vec(&spi).unwrap_or_default();
+        let consensus_message = ConsensusMessage {
+            sender_id: peer_info.id.to_string(),
+            state_id: format!("peer_connected_{}", peer_info.id),
+            raw_data: Bytes::from(payload),
+            signature: Vec::new(),
+        };
+        self.pipeline.submit(consensus_message);
 
         Ok(())
     }
@@ -280,27 +369,14 @@ impl MessageHandler for QuantumNetworkHandler {
     async fn handle_peer_disconnected(&mut self, peer_id: Uuid) -> Result<(), NetworkError> {
         info!("[QuantumNetworkHandler] Peer отключился: {}", peer_id);
 
-        // Создаем ПОДПИСАННУЮ волну отключения
-        let wave = QuantumWave::new_signed(
-            format!("peer_disconnected_{}", peer_id),
-            0.5, // Уменьшенная амплитуда для отключения
-            0.0,
-            "peer_disconnection".to_string(),
-            vec![crate::quantum::field::StateVector {
-                value: num_complex::Complex::new(0.5, 0.0),
-                probability: 0.5,
-            }],
-            &self.consensus_node.lock().await.secret_key,
-        );
-
-        // Добавляем в квантовое поле после проверки подписи
-        {
-            let mut consensus = self.consensus_node.lock().await;
-            let vk = consensus.public_key.clone();
-            if let Err(e) = consensus.field.add_signed_wave(wave.id.clone(), wave, &vk) {
-                error!("Отклонена волна peer_disconnected: {}", e);
-            }
-        }
+        // Отправляем сервисное сообщение в pipeline
+        let consensus_message = ConsensusMessage {
+            sender_id: peer_id.to_string(),
+            state_id: format!("peer_disconnected_{}", peer_id),
+            raw_data: Bytes::new(),
+            signature: Vec::new(),
+        };
+        self.pipeline.submit(consensus_message);
 
         Ok(())
     }
@@ -325,40 +401,27 @@ impl QuantumNetworkHandler {
         // Обрабатываем через консенсус: подписываем полезную нагрузку
         let raw = bincode::serialize(&transaction).unwrap_or_default();
         let signature = {
-            let consensus = self.consensus_node.lock().await;
+            let consensus = self.consensus_node.lock();
             let sig = consensus.sign_message(&raw);
             sig.to_bytes().to_vec()
         };
         let consensus_message = ConsensusMessage {
             sender_id: from.to_string(),
             state_id: transaction.id.to_string(),
-            raw_data: raw,
+            raw_data: Bytes::from(raw),
             signature,
         };
 
-        {
-            let mut consensus = self.consensus_node.lock().await;
-            // Используем публичный ключ локального узла (в демо мы отправитель)
-            let vk = consensus.public_key.clone();
-            if let Err(e) = consensus.process_message(consensus_message, &vk) {
-                error!("Ошибка обработки транзакции в консенсусе: {}", e);
-            }
-        }
+        // Передаём в конвейер для дальнейшей обработки
+        self.pipeline.submit(consensus_message);
 
         Ok(())
     }
 
     async fn handle_consensus_message(&self, from: Uuid, consensus_msg: ConsensusMessage) -> Result<(), NetworkError> {
         debug!("Обработка консенсусного сообщения от узла {}: {}", from, consensus_msg.state_id);
-        
-        {
-            let mut consensus = self.consensus_node.lock().await;
-            // Создаем фиктивный публичный ключ для демо
-            let dummy_public_key = consensus.public_key.clone();
-            if let Err(e) = consensus.process_message(consensus_msg, &dummy_public_key) {
-                error!("Ошибка обработки консенсусного сообщения: {}", e);
-            }
-        }
+        // Передаём в конвейер для дальнейшей обработки
+        self.pipeline.submit(consensus_msg);
 
         Ok(())
     }

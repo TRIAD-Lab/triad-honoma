@@ -1,6 +1,7 @@
 use crate::quantum::consensus::{ConsensusNode, ConsensusMessage};
 use super::{Shard, assign_shard};
 use rayon::prelude::*;
+use bytes::Bytes;
 
 #[test]
 fn test_sharding_parallel_processing() {
@@ -32,7 +33,8 @@ fn test_sharding_parallel_processing() {
                 .map(|op| ConsensusMessage {
                     sender_id: format!("shard{}_node{}", shard_id, node_idx),
                     state_id: format!("state{}_{}_{}", shard_id, node_idx, op),
-                    raw_data: vec![op as u8, (op + 1) as u8, (op + 2) as u8],
+                    raw_data: Bytes::from(vec![op as u8, (op + 1) as u8, (op + 2) as u8]),
+                    signature: vec![],
                 })
                 .collect();
             all_shard_messages[shard_id][node_idx] = messages;
