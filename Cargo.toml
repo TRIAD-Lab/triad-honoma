@@ -41,6 +41,7 @@ tracing-log = "0.1"
 crossbeam-channel = "0.5"
 ahash = "0.8"
 solana_rbpf = { version = "0.8", default-features = false }
+wasmtime = { version = "14", optional = true }
 sha2 = "0.10"
 bincode = "1"
 parking_lot = "0.12"
@@ -102,6 +103,7 @@ tokio-tungstenite = "0.20"
 
 [features]
 default = ["zebra_batch", "rbpf_vm"]
+wasm = ["wasmtime"]
 rbpf_vm = []
 cuda = ["cust"]
 opencl = ["ocl"]

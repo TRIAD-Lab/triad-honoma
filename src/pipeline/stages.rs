@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel as xchan;
 use rayon::prelude::*;
-use tracing::{info, debug, warn};
+use tracing::warn;
 use sha2::{Sha256, Digest};
 use dashmap::DashMap;
 use bytes::Bytes;
@@ -14,8 +14,7 @@ use bytes::Bytes;
 use crate::pipeline::config::PipelineConfig;
 use crate::pipeline::metrics::StageMetrics;
 use crate::quantum::consensus::{ConsensusMessage, ConsensusNode};
-use crate::quantum::field::{ShardedQuantumField, WaveValidationResult};
-use crate::quantum::InterferenceEngine;
+use crate::quantum::field::WaveValidationResult;
 use crate::tvm::{Tvm, TvmConfig, scheduler::{Scheduler, BatchItem}, state::{StateView, KeyAccess}, ExecEnvelope};
 use crate::tvm::loader::{TvmProgram, load_program};
 use crate::transaction::Transaction;
@@ -175,6 +174,8 @@ impl Pipeline {
                 let tvm_cfg = TvmConfig::from_env();
                 let resolver = crate::tvm::syscalls::build_resolver_from_config(&tvm_cfg);
                 let tvm = Tvm::new(tvm_cfg.clone(), resolver);
+                #[cfg(feature = "wasm")]
+                let wasm_exec = crate::tvm::WasmExecutor::new(tvm_cfg.clone());
 
                 loop {
                     match rx.recv() {
@@ -253,7 +254,15 @@ impl Pipeline {
                                         );
                                         (res, wb)
                                     } else {
-                                        // Fallback: try TVM precompile (e.g., TRD-20 JSON ABI)
+                                        // Fallbacks: WASM (feature) -> precompile JSON -> error
+                                        #[cfg(feature = "wasm")]
+                                        {
+                                            // Detect WASM module by magic: 0x00 61 73 6d
+                                            if bytes_ref.len() >= 4 && &bytes_ref[0..4] == b"\0asm" {
+                                                let (res, wb) = wasm_exec.execute(bytes_ref, &[], &state, analysis.average_amplitude);
+                                                return (res, wb);
+                                            }
+                                        }
                                         if let Some((res, wb)) = crate::tvm::precompile::try_execute_precompile(bytes_ref, &state, analysis.average_amplitude) {
                                             (res, wb)
                                         } else {
@@ -268,11 +277,19 @@ impl Pipeline {
                                 }
                             }
 
-                            // Применяем обновления амплитуд в поле (одной критической секцией)
+                            // Применяем обновления амплитуд и выполняем резонансную синхронизацию/регенерацию поля (одной критической секцией)
                             {
                                 let mut cons = consensus.lock();
                                 cons.field.update_wave_amplitudes(&amplitude_updates);
                                 cons.field.remove_extinguished_waves();
+                                // Резонансная синхронизация с допустимым отклонением
+                                let _synced = cons.field.sync_resonance(analysis.average_amplitude, conf2.resonance_tolerance);
+                                // Регенерация поля при необходимости
+                                let _added = cons.field.regenerate_wavefield(
+                                    conf2.regen_min_per_shard,
+                                    conf2.regen_weak_threshold,
+                                    conf2.regen_max_new_per_shard,
+                                );
                             }
 
                             let d = t0.elapsed();

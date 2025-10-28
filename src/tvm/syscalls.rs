@@ -67,8 +67,9 @@ pub fn build_resolver_from_config(cfg: &TvmConfig) -> SyscallResolver {
     if cfg.syscalls_enabled.sha256 { b = b.with_sha256(); }
     if cfg.syscalls_enabled.ed25519_verify { b = b.with_ed25519_verify(); }
     if cfg.syscalls_enabled.math { b = b.with_math(); }
-    // KV must always be available for contracts to interact with state
-    b = b.with_kv().with_trd20();
+    // Enable KV/TRD20 according to whitelist toggles
+    if cfg.syscalls_enabled.kv { b = b.with_kv(); }
+    if cfg.syscalls_enabled.trd20 { b = b.with_trd20(); }
     b.build()
 }
 

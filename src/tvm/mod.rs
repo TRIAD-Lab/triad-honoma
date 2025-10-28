@@ -12,6 +12,8 @@ pub mod metrics;
 pub mod context;
 pub mod security;
 pub mod precompile;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 pub use config::TvmConfig;
 pub use abi::{TvmAbi, AbiConst};
@@ -22,3 +24,5 @@ pub use loader::TvmProgram;
 pub use vm::{Tvm, TvmExecutionResult};
 pub use scheduler::{BatchItem, ScheduledBatch, Scheduler};
 pub use metrics::{StageTimers, HistogramStats};
+#[cfg(feature = "wasm")]
+pub use wasm::WasmExecutor;

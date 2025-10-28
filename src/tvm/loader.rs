@@ -36,6 +36,7 @@ pub fn load_program(code_elf: &[u8], cfg: &TvmConfig, resolver: SyscallResolver)
         AbiConst::SC_KV_GET,
         AbiConst::SC_KV_PUT,
         AbiConst::SC_KV_DEL,
+        AbiConst::SC_TRD20_CALL,
     ] {
         if let Some(func) = resolver(name) {
             freg

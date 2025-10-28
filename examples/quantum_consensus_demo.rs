@@ -4,7 +4,7 @@ use std::time::{Instant, Duration};
 use serde::{Serialize, Deserialize};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
-use ed25519_dalek::{VerifyingKey};
+// CRYPTO DISABLED: use ed25519_dalek::{VerifyingKey};
 use triad::quantum::{InterferenceEngine, QuantumWave, QuantumState, StateVector};
 use triad::quantum::field::ShardedQuantumField;
 use triad::quantum::consensus::{ConsensusNode, ConsensusMessage};
@@ -26,23 +26,15 @@ use bytes::Bytes;
 use crossbeam_channel as xchan;
 
 /*
- * TRIAD Quantum Consensus Demo - Enhanced with Wave Signature System
+ * TRIAD Quantum Consensus Demo - RAW PERFORMANCE MODE (NO CRYPTO)
  * 
- * NEW FEATURES:
- * 1. Wave Signature: Transactions are converted to quantum waves and signed with Ed25519
- * 2. Interference Validation: Waves are validated through quantum interference patterns
- * 3. Dynamic Amplitude: Wave amplitudes change based on validation results
- * 4. Wave Lifecycle Management: Automatic cleanup of expired/extinguished waves
- * 5. Ed25519 Aggregation: Multiple wave signatures are aggregated for efficient verification
+ * CRYPTO DISABLED FOR PURE INTERFERENCE TESTING:
+ * - All Ed25519 signature/verification removed
+ * - Pure quantum interference consensus without cryptographic overhead
+ * - Maximum TPS benchmark mode
  * 
- * KEY INNOVATION: Instead of signing transactions, we sign QUANTUM WAVES
- * and validate them through physical interference patterns with Ed25519 aggregation!
- * 
- * ED25519 WAVE SIGNATURES:
- * - Each quantum wave is signed with Ed25519 signature
- * - Signatures are aggregated for batch verification
- * - Only valid wave signatures participate in consensus
- * - 1000x faster verification through aggregation
+ * This configuration shows the raw computational capacity of the
+ * quantum interference engine without cryptographic bottlenecks.
  */
 
 // Правильное измерение TPS
@@ -92,8 +84,8 @@ impl PerformanceConfig {
     }
 }
 
-// Ed25519 быстрые подписи для ускорения верификации
-use ed25519_dalek::{SigningKey as Keypair, VerifyingKey as Ed25519PublicKey, Signature as Ed25519Signature, Signer, Verifier};
+// CRYPTO DISABLED: Ed25519 signatures removed for raw performance testing
+// use ed25519_dalek::{SigningKey as Keypair, VerifyingKey as Ed25519PublicKey, Signature as Ed25519Signature, Signer, Verifier};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Args {
@@ -286,63 +278,16 @@ impl QuantumStatePool {
     }
 }
 
-// Ed25519 KeyPool для предварительно сгенерированных ключей с агрегацией
+// CRYPTO DISABLED: Ed25519KeyPool replaced with no-op stub
 #[derive(Clone)]
 struct Ed25519KeyPool {
-    keypairs: Vec<Keypair>,
-    public_keys: Vec<Ed25519PublicKey>,
-    verification_cache: Arc<StdMutex<HashMap<String, bool>>>, // Кэш для верификации
+    size: usize,
 }
 
 impl Ed25519KeyPool {
     fn new(size: usize) -> Self {
-        let mut keypairs = Vec::with_capacity(size);
-        let mut public_keys = Vec::with_capacity(size);
-        
-        for _ in 0..size {
-            let keypair = Keypair::generate(&mut rand::thread_rng());
-            let public_key = keypair.verifying_key();
-            keypairs.push(keypair);
-            public_keys.push(public_key);
-        }
-        
-        Self {
-            keypairs,
-            public_keys,
-            verification_cache: Arc::new(StdMutex::new(HashMap::new())),
-        }
-    }
-
-    fn get_keypair(&self, index: usize) -> &Keypair {
-        &self.keypairs[index % self.keypairs.len()]
-    }
-
-    fn get_public_key(&self, index: usize) -> &Ed25519PublicKey {
-        &self.public_keys[index % self.public_keys.len()]
-    }
-
-    // Быстрая batch верификация Ed25519 подписей с параллелизмом
-    fn batch_verify_signatures(&self, signatures: &[Ed25519Signature], messages: &[Vec<u8>], public_keys: &[&Ed25519PublicKey]) -> Vec<bool> {
-        // Оптимизация: если подписей мало, используем последовательную верификацию
-        if signatures.len() < 50 {
-            return signatures.iter()
-                .zip(messages.iter())
-                .zip(public_keys.iter())
-                .map(|((sig, msg), pk)| {
-                    pk.verify(msg.as_slice(), sig).is_ok()
-                })
-                .collect();
-        }
-        
-        // Для больших batch используем параллельную верификацию
-        signatures.iter()
-            .zip(messages.iter())
-            .zip(public_keys.iter())
-            .par_bridge() // Параллельная обработка
-            .map(|((sig, msg), pk)| {
-                pk.verify(msg.as_slice(), sig).is_ok()
-            })
-            .collect()
+        println!("⚡ CRYPTO DISABLED: Ed25519KeyPool running in no-op mode for maximum performance");
+        Self { size }
     }
 }
 
@@ -486,12 +431,11 @@ fn create_sharded_messages_from_transactions(transactions: &[DemoTransaction], n
     sharded_messages
 }
 
-// Обрабатываем консенсус в распределенном режиме
+// CRYPTO DISABLED: Process consensus without cryptographic keys
 fn process_distributed_consensus(
     nodes: &mut [ConsensusNode],
     sharded_messages: &[Vec<ConsensusMessage>],
     accounts_state: &mut HashMap<String, AccountState>,
-    pubkeys: &HashMap<String, VerifyingKey>,
     quantum_field: &Arc<StdMutex<ShardedQuantumField>>,
     interference_engine: &Arc<StdMutex<InterferenceEngine>>,
     verification_results: &[bool],
@@ -975,95 +919,15 @@ impl DistributedNetworkManager {
         Ok(())
     }
 
-    // Демонстрируем Ed25519 агрегацию для подписей волн
+    // CRYPTO DISABLED: No-op demonstration
     fn demonstrate_ed25519_aggregation(&self) {
-        println!("🔐 === Ed25519 Wave Signature Aggregation Demo ===");
-        
-        // Создаем тестовые квантовые волны
-        let test_waves = vec![
-            ("wave_1", "tx_1", 1.5, 0.5, 0),
-            ("wave_2", "tx_2", 2.0, 1.2, 1),
-            ("wave_3", "tx_3", 0.8, 2.1, 2),
-        ];
-        
-        // Создаем подписи волн
-        let mut wave_signatures = Vec::new();
-        let mut signatures = Vec::new();
-        let mut public_keys = Vec::new();
-        
-        for (i, (wave_id, tx_id, amplitude, phase, shard_id)) in test_waves.iter().enumerate() {
-            let wave_sig = WaveSignature::new(
-                wave_id.to_string(),
-                tx_id.to_string(),
-                *amplitude,
-                *phase,
-                *shard_id,
-                vec![], // Пока пустая
-                i,
-            );
-            
-                    let keypair = self.keypool.get_keypair(i);
-            let public_key = self.keypool.get_public_key(i);
-            
-            // Подписываем волну
-            let message = wave_sig.create_signature_message();
-            let signature = keypair.sign(&message);
-            
-            // Создаем финальную подпись волны
-            let final_wave_sig = WaveSignature::new(
-                wave_id.to_string(),
-                tx_id.to_string(),
-                *amplitude,
-                *phase,
-                *shard_id,
-                signature.to_bytes().to_vec(),
-                i,
-            );
-            
-            wave_signatures.push(final_wave_sig);
-            signatures.push(signature);
-            public_keys.push(public_key);
-        }
-        
-        println!("🔐 Created {} wave signatures", signatures.len());
-        
-        // Batch верификация подписей волн
-        let aggregation_start = Instant::now();
-        
-        // Создаем сообщения для верификации
-        let messages: Vec<Vec<u8>> = wave_signatures.iter()
-            .map(|ws| ws.create_signature_message())
-            .collect();
-        
-        // Используем batch верификацию
-        let verification_results = self.keypool.batch_verify_signatures(&signatures, &messages, &public_keys);
-        let aggregation_time = aggregation_start.elapsed();
-        
-        let valid_count = verification_results.iter().filter(|&&valid| valid).count();
-        println!("🚀 Ed25519 Batch Wave Signature Verification completed in {:.3}ms", aggregation_time.as_secs_f64() * 1000.0);
-        println!("✅ Batch verification: {}/{} signatures valid", valid_count, signatures.len());
-        
-        // Сравниваем с индивидуальной проверкой
-        let individual_start = Instant::now();
-        let mut individual_valid = true;
-        for ((signature, public_key), message) in signatures.iter().zip(public_keys.iter()).zip(messages.iter()) {
-            if public_key.verify(message, signature).is_err() {
-                individual_valid = false;
-                break;
-            }
-        }
-        let individual_time = individual_start.elapsed();
-        
-        println!("📊 Wave signature performance comparison:");
-        println!("   Individual verification: {:.3}ms", individual_time.as_secs_f64() * 1000.0);
-        println!("   Batch verification: {:.3}ms", aggregation_time.as_secs_f64() * 1000.0);
-        println!("   Speedup: {:.1}x", individual_time.as_secs_f64() / aggregation_time.as_secs_f64());
-        
-        println!("🔐 === End Ed25519 Wave Signature Demo ===\n");
+        println!("⚡ === [NO-CRYPTO] Ed25519 Demo Skipped (crypto disabled) ===");
+        println!("⚡ Running in pure interference mode for maximum TPS");
+        println!("⚡ === End Demo ===\n");
     }
 
     async fn run_consensus_simulation(&mut self) -> Result<(), String> {
-        println!("🔄 Starting distributed consensus simulation with Ed25519 aggregation...");
+        println!("⚡ Starting distributed consensus simulation [NO-CRYPTO MODE - Pure Interference]...");
         
         // Демонстрируем Ed25519 агрегацию
         self.demonstrate_ed25519_aggregation();
@@ -1171,10 +1035,9 @@ impl DistributedNetworkManager {
                 &mut nodes,
                 &sharded_messages,
                 &mut accounts_state,
-                &HashMap::new(), // Упрощенные ключи для демо
                 &local_field,
                 &local_engine,
-                &wave_verification_results, // Используем результаты верификации волн
+                &wave_verification_results,
                 &keypool
             );
             let consensus_time = consensus_start.elapsed();
@@ -1404,17 +1267,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             accounts.push(format!("{}_{}_{}", account_type, account_id, rng.gen_range(1000..9999)));
         }
         
-        // Создаем Ed25519 KeyPool для локального режима
+        // CRYPTO DISABLED: No keypairs needed
         let keypool = Ed25519KeyPool::new(100);
-        let pubkeys: HashMap<String, VerifyingKey> = (0..100)
-            .map(|i| {
-                let account = &accounts[i];
-                // Для совместимости с существующим кодом создаем фиктивный VerifyingKey
-                // В реальной реализации нужно правильно конвертировать Ed25519 ключ
-                let dummy_key_bytes = [0u8; 32];
-                (account.clone(), VerifyingKey::from_bytes(&dummy_key_bytes).unwrap())
-            })
-            .collect();
         
         // Глобальное состояние аккаунтов
         let mut accounts_state: HashMap<String, AccountState> = accounts.iter()
@@ -1525,10 +1379,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &mut nodes,
                 &sharded_messages,
                 &mut accounts_state,
-                &HashMap::new(), // Упрощенные ключи для демо
                 &local_field,
                 &local_engine,
-                &wave_verification_results, // Используем результаты верификации волн
+                &wave_verification_results,
                 &keypool
             );
             let consensus_time = consensus_start.elapsed();
@@ -1639,14 +1492,14 @@ fn serialize_transactions(transactions: &[DemoTransaction]) -> Vec<u8> {
     serialized
 }
 
-// Функция для создания и подписи квантовых волн из транзакций
+// CRYPTO DISABLED: Create quantum waves without Ed25519 signatures
 fn create_and_sign_quantum_waves(
     transactions: &[DemoTransaction], 
-    keypool: &Ed25519KeyPool,
+    _keypool: &Ed25519KeyPool,
     shard_id: usize
 ) -> Vec<(QuantumWave, WaveSignature)> {
     let start = Instant::now();
-    println!("🌊 Creating and signing quantum waves for {} transactions", transactions.len());
+    println!("🌊 [NO-CRYPTO] Creating quantum waves for {} transactions (signatures disabled)", transactions.len());
     
     let waves_and_signatures: Vec<(QuantumWave, WaveSignature)> = transactions.iter().enumerate()
         .map(|(i, tx)| {
@@ -1674,39 +1527,23 @@ fn create_and_sign_quantum_waves(
             // Создаем квантовую волну
             let wave = QuantumWave::from(state);
             
-            // Создаем подпись волны
+            // Создаем пустую подпись волны (криптография отключена)
             let wave_signature = WaveSignature::new(
                 wave.id.to_string(),
                 tx.id.clone(),
                 amplitude,
                 phase,
                 shard_id,
-                vec![], // Пока пустая, заполним ниже
+                vec![], // NO SIGNATURE - crypto disabled
                 tx.public_key_idx,
             );
             
-            // Подписываем волну Ed25519 подписью
-            let keypair = keypool.get_keypair(tx.public_key_idx);
-            let message = wave_signature.create_signature_message();
-            let signature = keypair.sign(&message);
-            
-            // Создаем финальную подпись волны с реальной подписью
-            let final_wave_signature = WaveSignature::new(
-                wave.id.to_string(),
-                tx.id.clone(),
-                amplitude,
-                phase,
-                shard_id,
-                signature.to_bytes().to_vec(), // РЕАЛЬНАЯ Ed25519 подпись волны
-                tx.public_key_idx,
-            );
-            
-            (wave, final_wave_signature)
+            (wave, wave_signature)
         })
         .collect();
     
     let creation_time = start.elapsed();
-    println!("🌊 Created and signed {} quantum waves in {:.3}ms ({:.0} waves/sec)", 
+    println!("🌊 [NO-CRYPTO] Created {} quantum waves in {:.3}ms ({:.0} waves/sec)", 
         waves_and_signatures.len(), 
         creation_time.as_secs_f64() * 1000.0,
         waves_and_signatures.len() as f64 / creation_time.as_secs_f64());
@@ -1714,155 +1551,29 @@ fn create_and_sign_quantum_waves(
     waves_and_signatures
 }
 
-// Функция для верификации подписей квантовых волн с агрегацией
+// CRYPTO DISABLED: No verification - accept all waves
 fn verify_wave_signatures_with_aggregation(
     waves_and_signatures: &[(QuantumWave, WaveSignature)],
-    keypool: &Ed25519KeyPool
+    _keypool: &Ed25519KeyPool
 ) -> Vec<bool> {
     let start = Instant::now();
-    println!("🔐 [Wave Ed25519] Starting batch verification of {} wave signatures", waves_and_signatures.len());
+    println!("⚡ [NO-CRYPTO] Skipping signature verification for {} waves (all accepted)", waves_and_signatures.len());
     
-    // Собираем все подписи и сообщения для batch верификации
-    let mut signatures = Vec::new();
-    let mut messages = Vec::new();
-    let mut public_keys = Vec::new();
-    let mut valid_indices = Vec::new();
-    
-    for (i, (_, wave_sig)) in waves_and_signatures.iter().enumerate() {
-        if let Ok(signature) = Ed25519Signature::try_from(wave_sig.signature.as_slice()) {
-            let message = wave_sig.create_signature_message();
-            let public_key = keypool.get_public_key(wave_sig.public_key_idx);
-            
-            signatures.push(signature);
-            messages.push(message);
-            public_keys.push(public_key);
-            valid_indices.push(i);
-        }
-    }
-    
-    println!("🔐 [Wave Ed25519] Collected {} valid wave signatures for batch verification", signatures.len());
-    
-    if signatures.is_empty() {
-        println!("❌ No valid wave signatures found");
-        return vec![false; waves_and_signatures.len()];
-    }
-    
-    // БЫСТРАЯ BATCH ВЕРИФИКАЦИЯ Ed25519 для подписей волн
-    let verification_start = Instant::now();
-    let verification_results = keypool.batch_verify_signatures(&signatures, &messages, &public_keys);
-    
-    let verification_time = verification_start.elapsed();
-    let sig_per_sec = signatures.len() as f64 / verification_time.as_secs_f64();
-    let valid_count = verification_results.iter().filter(|&&valid| valid).count();
-    println!("🚀 [Wave Ed25519] Batch Verification: {} wave signatures in {:.3}ms ({:.0} sig/sec) | Valid: {}/{}", 
-        signatures.len(), verification_time.as_secs_f64() * 1000.0, sig_per_sec, valid_count, signatures.len());
-    
-    // Расширяем результаты до полного размера
-    let mut full_results = vec![false; waves_and_signatures.len()];
-    for (i, &is_valid) in verification_results.iter().enumerate() {
-        if i < valid_indices.len() {
-            let original_idx = valid_indices[i];
-            if original_idx < full_results.len() {
-                full_results[original_idx] = is_valid;
-            }
-        }
-    }
+    // All waves are valid when crypto is disabled
+    let results = vec![true; waves_and_signatures.len()];
     
     let total_time = start.elapsed();
-    let valid_count = full_results.iter().filter(|&&valid| valid).count();
-    println!("🔐 [Wave Ed25519] Total verification: {:.3}ms | {}/{} wave signatures valid", 
-        total_time.as_secs_f64() * 1000.0, valid_count, waves_and_signatures.len());
+    println!("⚡ [NO-CRYPTO] Instant verification: {:.3}ms | {}/{} waves valid", 
+        total_time.as_secs_f64() * 1000.0, results.len(), waves_and_signatures.len());
     
-    full_results
+    results
 }
 
-// Демонстрируем Ed25519 агрегацию в локальном режиме для подписей волн
-fn demonstrate_local_ed25519_aggregation(keypool: &Ed25519KeyPool) {
-    println!("🔐 === Local Ed25519 Wave Signature Aggregation Demo ===");
-    
-    // Создаем тестовые квантовые волны
-    let test_waves = vec![
-        ("local_wave_1", "local_tx_1", 1.2, 0.8, 0),
-        ("local_wave_2", "local_tx_2", 1.8, 1.5, 1),
-        ("local_wave_3", "local_tx_3", 0.9, 2.3, 2),
-        ("local_wave_4", "local_tx_4", 2.1, 0.3, 0),
-        ("local_wave_5", "local_tx_5", 1.4, 1.8, 1),
-    ];
-    
-    // Создаем подписи волн
-    let mut wave_signatures = Vec::new();
-    let mut signatures = Vec::new();
-    let mut public_keys = Vec::new();
-    
-    for (i, (wave_id, tx_id, amplitude, phase, shard_id)) in test_waves.iter().enumerate() {
-        let wave_sig = WaveSignature::new(
-            wave_id.to_string(),
-            tx_id.to_string(),
-            *amplitude,
-            *phase,
-            *shard_id,
-            vec![], // Пока пустая
-            i,
-        );
-        
-        let keypair = keypool.get_keypair(i);
-        let public_key = keypool.get_public_key(i);
-        
-        // Подписываем волну
-        let message = wave_sig.create_signature_message();
-        let signature = keypair.sign(&message);
-        
-        // Создаем финальную подпись волны
-        let final_wave_sig = WaveSignature::new(
-            wave_id.to_string(),
-            tx_id.to_string(),
-            *amplitude,
-            *phase,
-            *shard_id,
-                            signature.to_bytes().to_vec(),
-            i,
-        );
-        
-        wave_signatures.push(final_wave_sig);
-        signatures.push(signature);
-        public_keys.push(public_key);
-    }
-    
-    println!("🔐 Created {} local wave signatures", signatures.len());
-    
-    // Batch верификация подписей волн
-    let aggregation_start = Instant::now();
-    
-    // Создаем сообщения для верификации
-    let messages: Vec<Vec<u8>> = wave_signatures.iter()
-        .map(|ws| ws.create_signature_message())
-        .collect();
-    
-    // Используем batch верификацию
-    let verification_results = keypool.batch_verify_signatures(&signatures, &messages, &public_keys);
-    let aggregation_time = aggregation_start.elapsed();
-    
-    let valid_count = verification_results.iter().filter(|&&valid| valid).count();
-    println!("🚀 Local Ed25519 Batch Wave Signature Verification completed in {:.3}ms", aggregation_time.as_secs_f64() * 1000.0);
-    println!("✅ Local batch verification: {}/{} signatures valid", valid_count, signatures.len());
-    
-    // Сравниваем с индивидуальной проверкой
-    let individual_start = Instant::now();
-    let mut individual_valid = true;
-    for ((signature, public_key), message) in signatures.iter().zip(public_keys.iter()).zip(messages.iter()) {
-        if public_key.verify(message, signature).is_err() {
-            individual_valid = false;
-            break;
-        }
-    }
-    let individual_time = individual_start.elapsed();
-    
-    println!("📊 Local wave signature performance comparison:");
-    println!("   Individual verification: {:.3}ms", individual_time.as_secs_f64() * 1000.0);
-    println!("   Batch verification: {:.3}ms", aggregation_time.as_secs_f64() * 1000.0);
-    println!("   Speedup: {:.1}x", individual_time.as_secs_f64() / aggregation_time.as_secs_f64());
-    
-    println!("🔐 === End Local Ed25519 Wave Signature Demo ===\n");
+// CRYPTO DISABLED: No-op demonstration
+fn demonstrate_local_ed25519_aggregation(_keypool: &Ed25519KeyPool) {
+    println!("⚡ === [NO-CRYPTO] Ed25519 Demo Skipped (crypto disabled) ===");
+    println!("⚡ Running in pure interference mode for maximum TPS");
+    println!("⚡ === End Demo ===\n");
 }
 
 // Функция для вычисления фазы волны на основе содержания транзакции

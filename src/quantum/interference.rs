@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::RwLock;
 use rayon::prelude::*;
-use sha2::{Sha256, Digest};
 use wide::f64x4;
 
 #[cfg(feature = "cuda")]
@@ -247,17 +246,22 @@ impl InterferenceEngine {
 
     /// Быстрый расчёт интерференции из пар (amplitude, phase) с кэшированием
     pub fn calculate_interference_from_pairs_inplace(&mut self, pairs: &[(f64,f64)]) -> Vec<InterferencePoint> {
-        // Кэш-ключ по числовым параметрам
-        let mut hasher = Sha256::new();
-        hasher.update((pairs.len() as u64).to_le_bytes());
-        for (a,p) in pairs {
-            hasher.update(a.to_le_bytes());
-            hasher.update(p.to_le_bytes());
+        // OPTIMIZATION: Calculate both checksum AND total_amp_sum in single pass!
+        let mut checksum: u64 = pairs.len() as u64;
+        let mut amp_sum_bits: u64 = 0;
+        let mut phase_sum_bits: u64 = 0;
+        let mut total_amp_sum: f64 = 0.0; // Calculate during same iteration
+        for (a, p) in pairs {
+            amp_sum_bits = amp_sum_bits.wrapping_add(a.to_bits());
+            phase_sum_bits = phase_sum_bits.wrapping_add(p.to_bits());
+            total_amp_sum += a; // No extra iteration needed!
         }
-        hasher.update((self.resolution as u64).to_le_bytes());
-        hasher.update(self.decay_factor.to_le_bytes());
-        hasher.update(self.threshold.to_le_bytes());
-        let cache_key = format!("{:x}", hasher.finalize());
+        checksum ^= amp_sum_bits;
+        checksum ^= phase_sum_bits;
+        checksum ^= self.resolution as u64;
+        checksum ^= self.decay_factor.to_bits();
+        checksum ^= self.threshold.to_bits();
+        let cache_key = format!("{:x}", checksum);
 
         {
             let cache = self.cache.read();
@@ -270,7 +274,7 @@ impl InterferenceEngine {
         }
         let step = 1.0 / self.resolution as f64;
         let decay = self.decay_factor;
-        let total_amp_sum: f64 = pairs.iter().map(|(a,_)| *a).sum();
+        // total_amp_sum already calculated above!
         self.pattern_buffer
             .as_mut_slice()
             .par_iter_mut()
@@ -296,65 +300,89 @@ impl InterferenceEngine {
     }
 
     fn generate_cache_key(&self, states: &[QuantumState]) -> String {
-        // Быстрый кэш-ключ без сериализации JSON: хешируем количество и пары (amplitude, phase)
-        let mut hasher = Sha256::new();
-        hasher.update((states.len() as u64).to_le_bytes());
+        // OPTIMIZATION: Fast checksum instead of SHA256
+        let mut checksum: u64 = states.len() as u64;
+        let mut amp_sum: u64 = 0;
+        let mut phase_sum: u64 = 0;
         for s in states {
-            hasher.update(s.amplitude.to_le_bytes());
-            hasher.update(s.phase.to_le_bytes());
+            amp_sum = amp_sum.wrapping_add(s.amplitude.to_bits());
+            phase_sum = phase_sum.wrapping_add(s.phase.to_bits());
         }
-        // Также включаем resolution/decay_factor/threshold, чтобы кэш учитывать параметры движка
-        hasher.update((self.resolution as u64).to_le_bytes());
-        hasher.update(self.decay_factor.to_le_bytes());
-        hasher.update(self.threshold.to_le_bytes());
-        format!("{:x}", hasher.finalize())
+        checksum ^= amp_sum;
+        checksum ^= phase_sum;
+        checksum ^= self.resolution as u64;
+        checksum ^= self.decay_factor.to_bits();
+        checksum ^= self.threshold.to_bits();
+        format!("{:x}", checksum)
     }
     
     pub fn analyze_interference(&self, pattern: &[InterferencePoint]) -> InterferenceAnalysis {
-        let mut analysis = InterferenceAnalysis {
-            max_amplitude: 0.0,
-            min_amplitude: f64::MAX,
-            average_amplitude: 0.0,
-            constructive_points: Vec::with_capacity(pattern.len() / 2),
-            destructive_points: Vec::with_capacity(pattern.len() / 2),
-        };
+        if pattern.is_empty() {
+            return InterferenceAnalysis {
+                max_amplitude: 0.0,
+                min_amplitude: 0.0,
+                average_amplitude: 0.0,
+                constructive_points: Vec::new(),
+                destructive_points: Vec::new(),
+            };
+        }
         
-        // Parallel analysis
-        let (max_amp, min_amp, sum_amp, constructive, destructive) = pattern.par_iter()
+        // FIRST PASS: Find max/min/avg in parallel
+        let (max_amp, min_amp, sum_amp) = pattern.par_iter()
             .fold(
-                || (0.0f64, f64::MAX, 0.0f64, Vec::new(), Vec::new()),
-                |(max, min, sum, mut constr, mut destr), point| {
-                    let amplitude = point.amplitude;
-                    let new_max = max.max(amplitude);
-                    let new_min = min.min(amplitude);
-                    let new_sum = sum + amplitude;
-                    
-                    if amplitude > 0.01 {
-                        constr.push(point.clone());
-                    } else if amplitude < -0.01 {
-                        destr.push(point.clone());
-                    }
-                    
-                    (new_max, new_min, new_sum, constr, destr)
+                || (0.0f64, f64::MAX, 0.0f64),
+                |(max, min, sum), point| {
+                    let amplitude = point.amplitude.abs(); // Use absolute value
+                    (max.max(amplitude), min.min(amplitude), sum + amplitude)
                 }
             )
             .reduce(
-                || (0.0f64, f64::MAX, 0.0f64, Vec::new(), Vec::new()),
-                |(max1, min1, sum1, mut constr1, mut destr1),
-                 (max2, min2, sum2, mut constr2, mut destr2)| {
-                    constr1.extend(constr2);
-                    destr1.extend(destr2);
-                    (max1.max(max2), min1.min(min2), sum1 + sum2, constr1, destr1)
+                || (0.0f64, f64::MAX, 0.0f64),
+                |(max1, min1, sum1), (max2, min2, sum2)| {
+                    (max1.max(max2), min1.min(min2), sum1 + sum2)
                 }
             );
         
-        analysis.max_amplitude = max_amp;
-        analysis.min_amplitude = min_amp;
-        analysis.average_amplitude = sum_amp / pattern.len() as f64;
-        analysis.constructive_points = constructive;
-        analysis.destructive_points = destructive;
+        let avg_amp = sum_amp / pattern.len() as f64;
         
-        analysis
+        // FIX: Dynamic threshold based on max_amplitude (like in quantum_consensus_demo)
+        // Constructive: amplitude > 50% of max
+        // Destructive: amplitude < 10% of max
+        let constructive_threshold = max_amp * 0.5;
+        let destructive_threshold = max_amp * 0.1;
+        
+        // SECOND PASS: Classify points with dynamic threshold
+        let (constructive, destructive) = pattern.par_iter()
+            .fold(
+                || (Vec::new(), Vec::new()),
+                |(mut constr, mut destr), point| {
+                    let amplitude = point.amplitude.abs();
+                    
+                    if amplitude > constructive_threshold {
+                        constr.push(point.clone());
+                    } else if amplitude < destructive_threshold {
+                        destr.push(point.clone());
+                    }
+                    
+                    (constr, destr)
+                }
+            )
+            .reduce(
+                || (Vec::new(), Vec::new()),
+                |(mut constr1, mut destr1), (mut constr2, mut destr2)| {
+                    constr1.extend(constr2);
+                    destr1.extend(destr2);
+                    (constr1, destr1)
+                }
+            );
+        
+        InterferenceAnalysis {
+            max_amplitude: max_amp,
+            min_amplitude: min_amp,
+            average_amplitude: avg_amp,
+            constructive_points: constructive,
+            destructive_points: destructive,
+        }
     }
 
     pub fn export_pattern_to_csv(&self, pattern: &[InterferencePoint], path: &str) -> std::io::Result<()> {

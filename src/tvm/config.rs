@@ -6,6 +6,7 @@ pub struct TvmConfig {
     pub max_stack_bytes: usize,
     pub max_heap_bytes: usize,
     pub max_input_bytes: usize,
+    pub max_wall_time_ms: u64,
     pub syscalls_enabled: SyscallsEnabled,
 }
 
@@ -15,11 +16,13 @@ pub struct SyscallsEnabled {
     pub ed25519_verify: bool,
     pub math: bool,
     pub gpu_offload: bool,
+    pub kv: bool,
+    pub trd20: bool,
 }
 
 impl Default for SyscallsEnabled {
     fn default() -> Self {
-        Self { sha256: true, ed25519_verify: true, math: true, gpu_offload: false }
+        Self { sha256: true, ed25519_verify: true, math: true, gpu_offload: false, kv: true, trd20: true }
     }
 }
 
@@ -30,6 +33,7 @@ impl Default for TvmConfig {
             max_stack_bytes: 256 * 1024,
             max_heap_bytes: 4 * 1024 * 1024,
             max_input_bytes: 64 * 1024,
+            max_wall_time_ms: 50,
             syscalls_enabled: SyscallsEnabled::default(),
         }
     }
@@ -46,11 +50,14 @@ impl TvmConfig {
             max_stack_bytes: parse_usize("TRIAD_TVM_MAX_STACK", def.max_stack_bytes),
             max_heap_bytes: parse_usize("TRIAD_TVM_MAX_HEAP", def.max_heap_bytes),
             max_input_bytes: parse_usize("TRIAD_TVM_MAX_INPUT", def.max_input_bytes),
+            max_wall_time_ms: parse_u64("TRIAD_TVM_MAX_WALL_MS", def.max_wall_time_ms),
             syscalls_enabled: SyscallsEnabled {
                 sha256: parse_bool("TRIAD_TVM_SC_SHA256", def.syscalls_enabled.sha256),
                 ed25519_verify: parse_bool("TRIAD_TVM_SC_ED25519", def.syscalls_enabled.ed25519_verify),
                 math: parse_bool("TRIAD_TVM_SC_MATH", def.syscalls_enabled.math),
                 gpu_offload: parse_bool("TRIAD_TVM_SC_GPU", def.syscalls_enabled.gpu_offload),
+                kv: parse_bool("TRIAD_TVM_SC_KV", def.syscalls_enabled.kv),
+                trd20: parse_bool("TRIAD_TVM_SC_TRD20", def.syscalls_enabled.trd20),
             },
         }
     }

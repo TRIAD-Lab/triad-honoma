@@ -53,12 +53,27 @@ impl Tvm {
         let snapshot = state.snapshot();
         timers.record_prepare(t_prepare.elapsed());
 
+        // Sandbox: bound input size
+        if input.len() > self.cfg.max_input_bytes {
+            let mut result = TvmExecutionResult { ok: false, return_code: -1, logs: vec![
+                format!("Input too large: {} bytes (max {})", input.len(), self.cfg.max_input_bytes)
+            ] };
+            return (result, WriteBatch::new(), timers);
+        }
+
         // Буферы памяти: стек/куча/вход
         let config = program.exec.get_config();
         let sbpf_version = program.exec.get_sbpf_version();
+        // Sandbox: validate stack limit against config
+        if config.stack_size() > self.cfg.max_stack_bytes {
+            let mut result = TvmExecutionResult { ok: false, return_code: -1, logs: vec![
+                format!("Stack size exceeds limit: {} > {}", config.stack_size(), self.cfg.max_stack_bytes)
+            ] };
+            return (result, WriteBatch::new(), timers);
+        }
         let mut stack = AlignedMemory::<{ ebpf::HOST_ALIGN }>::zero_filled(config.stack_size());
         let stack_len = stack.len();
-        let mut heap = AlignedMemory::<{ ebpf::HOST_ALIGN }>::with_capacity(0);
+        let mut heap = AlignedMemory::<{ ebpf::HOST_ALIGN }>::with_capacity(self.cfg.max_heap_bytes);
         let mut input_buf = input.to_vec(); // вход должен быть в writable регионе
 
         // Регионы памяти
@@ -79,7 +94,8 @@ impl Tvm {
 
         // Контекст и VM
         let loader = program.exec.get_loader().clone();
-        let mut context = TvmContext::new(10_000_000);
+        // Sandbox: instruction budget from config
+        let mut context = TvmContext::new(self.cfg.max_instructions);
         let mut vm = EbpfVm::new(loader, &sbpf_version, &mut context, memory_mapping, stack_len);
 
         // Исполнение
@@ -88,6 +104,7 @@ impl Tvm {
         let mut write_batch = WriteBatch::new();
 
         let (pr, wb) = with_program_context(snapshot, || {
+            // solana_rbpf 0.8: execute_program returns (u64, ProgramResult)
             vm.execute_program(&program.exec, true).1
         });
         write_batch = wb;
@@ -105,7 +122,20 @@ impl Tvm {
                 write_batch = WriteBatch::new(); // block state changes
             }
         }
-        timers.record_execute(t_exec.elapsed());
+        let exec_elapsed = t_exec.elapsed();
+        timers.record_execute(exec_elapsed);
+
+        // Wall-clock timeout enforcement
+        if exec_elapsed.as_millis() as u64 > self.cfg.max_wall_time_ms {
+            result.ok = false;
+            result.return_code = -1;
+            result.logs.push(format!(
+                "Execution timeout: {:?} > {} ms",
+                exec_elapsed,
+                self.cfg.max_wall_time_ms
+            ));
+            write_batch = WriteBatch::new();
+        }
 
         let t_commit = std::time::Instant::now();
         timers.record_commit(t_commit.elapsed());
