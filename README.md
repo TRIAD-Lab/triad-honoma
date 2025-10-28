@@ -225,7 +225,7 @@ TRIAD/
 
 ## 🗺️ Roadmap
 
-### Q2 2025 (Months 6-8): Global Testnet
+### Q2 2026 (Months 6-8): Global Testnet
 - **100+ validator nodes** across multiple regions
 - **20,000 TPS** target with full network stack
 - **Security audit** by external firm
@@ -233,7 +233,7 @@ TRIAD/
 - **Developer SDK v1.0** (Rust, TypeScript)
 - **Public documentation** and tutorials
 
-### Q4 2025 (Months 10-12): Mainnet Beta
+### Q4 2026 (Months 10-12): Mainnet Beta
 - **Public mainnet launch**
 - **Staking live** (TRD token)
 - **AMM DEX protocol** for liquidity
@@ -241,14 +241,14 @@ TRIAD/
 - **Mobile wallet** (iOS/Android)
 - **Block explorer** with analytics
 
-### 2026-2027: Ecosystem Expansion
+### 2027-2028: Ecosystem Expansion
 - **Cross-chain hub** (Solana, Cosmos IBC bridges)
 - **100,000+ TPS** with advanced sharding
 - **DeFi protocols** (lending, derivatives, stablecoins)
 - **Gaming infrastructure** (NFTs, in-game economies)
 - **Tier-2 CEX listings** (Gate.io, KuCoin, etc.)
 
-### 2028-2030: Mass Adoption
+### 2029-2031: Mass Adoption
 - **1M+ TPS** with horizontal scaling
 - **ZK rollups** for privacy and compression
 - **1000+ dApps** in ecosystem
