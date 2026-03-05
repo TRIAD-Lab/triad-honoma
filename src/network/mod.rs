@@ -1,14 +1,24 @@
 //! Network module for message exchange between nodes in a local network
 //! Provides node discovery, connection establishment, and message exchange
 
+pub mod monoio_server; // Phase 3: Monoio Runtime
+pub mod ring_buffer; // Phase 3: Zero-Copy
 pub mod types;
-mod discovery;
-mod transport;
-mod message;
 mod error;
+pub mod message;
+
+// Legacy modules (to be migrated)
+// pub mod p2p;
+// pub mod behaviour;
+pub mod discovery;
+#[cfg(target_os = "linux")]
+pub mod glommio_server;
+pub mod quic_server; // Phase 4: Quinn QUIC + BBR
+pub mod transport; // Transport layer
+
 mod peer;
 mod handler;
-mod quantum_handler;
+mod core_handler;
 // HTTP server removed - using WebSocket only
 pub mod websocket_server;
 pub mod websocket_client;
@@ -20,7 +30,7 @@ pub use transport::TransportService;
 pub use message::MessageService;
 pub use peer::PeerManager;
 pub use handler::MessageHandler;
-pub use quantum_handler::{QuantumNetworkHandler, QuantumNetworkStats, NetworkInterferenceEvent};
+pub use core_handler::{CoreNetworkHandler, CoreNetworkStats, NetworkInterferenceEvent};
 
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -28,7 +38,7 @@ use uuid::Uuid;
 use log::{debug, error, info};
 use std::time::{SystemTime, Duration, UNIX_EPOCH};
 use crate::transaction::{Transaction, SmartContract};
-use crate::quantum::consensus::{ConsensusMessage, ConsensusState, ConsensusNode};
+use crate::core::consensus::{ConsensusMessage, ConsensusState, ConsensusNode};
 use crate::sharding::ShardEvent;
 use crate::error_analysis::ErrorContext;
 use crate::semantic::SemanticAction;
@@ -57,15 +67,15 @@ pub struct Network {
     handler: Arc<RwLock<Box<dyn MessageHandler + Send + Sync>>>,
 }
 
-/// Упрощённый конструктор сети с глобальным QuantumNetworkHandler и единым StateView.
+/// Упрощённый конструктор сети с глобальным CoreNetworkHandler и единым StateView.
 /// Используйте этот путь, если требуется гарантированно глобальное состояние TVM/пайплайна для узла.
-pub async fn new_with_global_quantum_handler(
+pub async fn new_with_global_core_handler(
     node_id: Uuid,
     node_name: String,
     port: u16,
     consensus_node: Arc<RwLock<ConsensusNode>>,
 ) -> Result<Network, NetworkError> {
-    // QuantumNetworkHandler использует parking_lot::Mutex<ConsensusNode>.
+    // CoreNetworkHandler использует parking_lot::Mutex<ConsensusNode>.
     // Здесь извлекаем snapshot и переносим его под parking_lot::Mutex.
     let consensus_snapshot = {
         let mut guard = consensus_node.write().await;
@@ -73,7 +83,7 @@ pub async fn new_with_global_quantum_handler(
     };
     let consensus_arc: Arc<parking_lot::Mutex<ConsensusNode>> = Arc::new(parking_lot::Mutex::new(consensus_snapshot));
 
-    let handler: Box<dyn MessageHandler + Send + Sync> = crate::network::quantum_handler::build_global_quantum_handler(
+    let handler: Box<dyn MessageHandler + Send + Sync> = crate::network::core_handler::build_global_core_handler(
         node_id,
         consensus_arc,
     );
@@ -320,7 +330,7 @@ impl NetworkNode {
 }
 
 /// Starts a background task that periodically broadcasts resonance metrics over the message service.
-/// Metrics are computed from the current node's quantum field via the consensus node engine.
+/// Metrics are computed from the current node's Core field via the consensus node engine.
 pub fn start_resonance_sync_task(message_service: std::sync::Arc<MessageService>, consensus_node: std::sync::Arc<RwLock<ConsensusNode>>) {
     tokio::spawn(async move {
         loop {
@@ -337,3 +347,5 @@ pub fn start_resonance_sync_task(message_service: std::sync::Arc<MessageService>
         }
     });
 }
+
+

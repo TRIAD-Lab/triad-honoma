@@ -1,4 +1,6 @@
-use crate::quantum::consensus::{ConsensusNode, ConsensusMessage};
+pub mod const_routing; // Phase 2: Compile-time shard routing
+
+use crate::core::consensus::{ConsensusNode, ConsensusMessage};
 use rayon::prelude::*;
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
@@ -6,6 +8,8 @@ use smartcore::tree::decision_tree_classifier::DecisionTreeClassifier;
 use smartcore::linalg::basic::matrix::DenseMatrix;
 
 use smartcore::tree::decision_tree_classifier::DecisionTreeClassifierParameters;
+
+pub use const_routing::{get_shard_id, assign_shards_batch, SHARD_COUNT};
 
 pub struct Shard {
     pub id: usize,
@@ -21,7 +25,7 @@ impl Shard {
     pub fn process_messages(&mut self, all_messages: &[Vec<ConsensusMessage>]) {
         self.nodes.par_iter_mut().enumerate().for_each(|(node_idx, node)| {
             for message in &all_messages[node_idx] {
-                let public_key = node.public_key.clone();
+                let public_key = node.keypair.public;
                 let _ = node.process_message(message.clone(), &public_key);
             }
         });
@@ -30,7 +34,7 @@ impl Shard {
     pub fn process_batches(&mut self, all_batches: &[Vec<ConsensusMessage>]) {
         self.nodes.par_iter_mut().enumerate().for_each(|(node_idx, node)| {
             for batch in &all_batches[node_idx] {
-                let public_key = node.public_key.clone();
+                let public_key = node.keypair.public;
                 let _ = node.process_message(batch.clone(), &public_key);
             }
         });
@@ -78,13 +82,12 @@ impl ShardAI {
     }
 }
 
-/// Distributes messages among shards by state_id hash
-pub fn assign_shard(state_id: &str, num_shards: usize) -> usize {
-    use std::hash::{Hash, Hasher};
-    use std::collections::hash_map::DefaultHasher;
-    let mut hasher = DefaultHasher::new();
-    state_id.hash(&mut hasher);
-    (hasher.finish() as usize) % num_shards
+
+
+/// Теперь это — ультрабыстрый шардинг
+#[inline(always)]
+pub fn assign_shard(tx_hash: &[u8; 32]) -> u8 {
+    get_shard_id(tx_hash) // ← твой шедевр из const_routing
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,3 +101,5 @@ pub struct ShardEvent {
 
 #[cfg(test)]
 pub mod test_sharding; 
+
+

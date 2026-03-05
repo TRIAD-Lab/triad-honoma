@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use ahash::AHashMap as HashMap;
 use std::time::{SystemTime, Duration};
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 use log::{error, warn, info};
 use crate::transaction::{Transaction, TransactionStatus};
-use crate::quantum::field::QuantumState;
-use crate::quantum::consensus::ConsensusNode;
-use crate::quantum::field::WaveValidationResult;
+// use crate::core::field::CoreState; // LEGACY: CoreState removed
+use crate::core::consensus::ConsensusNode;
+use crate::core::field::WaveValidationResult;
 use smartcore::ensemble::random_forest_classifier::RandomForestClassifier;
 use smartcore::ensemble::random_forest_classifier::RandomForestClassifierParameters;
 use smartcore::linalg::basic::matrix::DenseMatrix;
@@ -75,11 +75,11 @@ pub enum ErrorCategory {
     NetworkConfiguration,
 
     // Квантовые ошибки
-    QuantumState,
-    QuantumMeasurement,
-    QuantumInterference,
-    QuantumEntanglement,
-    QuantumDecoherence,
+    CoreState,
+    CoreMeasurement,
+    CoreInterference,
+    CoreEntanglement,
+    CoreDecoherence,
 
     // Ошибки шардинга
     ShardAssignment,
@@ -108,10 +108,10 @@ pub enum ErrorType {
     TransactionError {
         transaction_id: String,
         status: TransactionStatus,
-        quantum_state: Option<QuantumState>,
+        Core_state: Option<String>, // Changed from Option<CoreState>
         error_message: String,
     },
-    QuantumError {
+    CoreError {
         state_id: String,
         amplitude: f64,
         expected_amplitude: f64,
@@ -139,7 +139,7 @@ pub struct ErrorContext {
     pub description: String,
     pub stack_trace: Option<String>,
     pub system_state: HashMap<String, String>,
-    pub quantum_state: Option<HashMap<String, f64>>,
+    pub Core_state: Option<HashMap<String, f64>>,
     pub shard_info: Option<HashMap<String, String>>,
     pub consensus_data: Option<HashMap<String, String>>,
     pub error_type: ErrorType,
@@ -190,7 +190,7 @@ pub struct SystemMetrics {
 pub struct ErrorAnalyzer {
     error_history: Vec<ErrorContext>,
     error_patterns: HashMap<String, Vec<ErrorType>>,
-    quantum_threshold: f64,
+    Core_threshold: f64,
 }
 
 impl SystemErrorAnalyzer {
@@ -255,8 +255,8 @@ impl SystemErrorAnalyzer {
                     "Неизвестная проблема с соединением".to_string()
                 }
             },
-            ErrorCategory::QuantumState => {
-                if let Some(state) = &context.quantum_state {
+            ErrorCategory::CoreState => {
+                if let Some(state) = &context.Core_state {
                     if state.values().any(|&v| v.is_nan() || v.is_infinite()) {
                         "Некорректное квантовое состояние: обнаружены недопустимые значения".to_string()
                     } else {
@@ -293,7 +293,7 @@ impl SystemErrorAnalyzer {
                     solutions.push("Добавить автоматический поиск свободного порта".to_string());
                 }
             },
-            ErrorCategory::QuantumState => {
+            ErrorCategory::CoreState => {
                 solutions.push("Переинициализировать квантовое состояние".to_string());
                 solutions.push("Применить квантовую коррекцию ошибок".to_string());
                 solutions.push("Проверить и исправить параметры квантовых операций".to_string());
@@ -326,8 +326,8 @@ impl SystemErrorAnalyzer {
                 security_impact = 0.3;
                 reliability_impact = 0.8;
             },
-            ErrorCategory::QuantumState => {
-                affected_components.push("Quantum".to_string());
+            ErrorCategory::CoreState => {
+                affected_components.push("Core".to_string());
                 affected_components.push("Consensus".to_string());
                 performance_impact = 0.5;
                 security_impact = 0.9;
@@ -461,7 +461,7 @@ impl ErrorAnalyzer {
         Self {
             error_history: Vec::new(),
             error_patterns: HashMap::new(),
-            quantum_threshold: 0.5,
+            Core_threshold: 0.5,
         }
     }
 
@@ -469,7 +469,7 @@ impl ErrorAnalyzer {
         let error_type = ErrorType::TransactionError {
             transaction_id: transaction.id.to_string(),
             status: transaction.status.clone(),
-            quantum_state: None, // Будет заполнено позже при анализе
+            Core_state: None, // Будет заполнено позже при анализе
             error_message: error.to_string(),
         };
 
@@ -489,7 +489,7 @@ impl ErrorAnalyzer {
             description: error.to_string(),
             stack_trace: None,
             system_state: HashMap::new(),
-            quantum_state: None,
+            Core_state: None,
             shard_info: None,
             consensus_data: None,
         };
@@ -500,13 +500,14 @@ impl ErrorAnalyzer {
         context
     }
 
-    pub fn analyze_quantum_state(&mut self, state: &QuantumState) -> Option<ErrorContext> {
+    /* LEGACY: CoreState removed
+    pub fn analyze_Core_state(&mut self, state: &CoreState) -> Option<ErrorContext> {
         // Проверяем амплитуду квантового состояния
-        if state.amplitude < self.quantum_threshold {
-            let error_type = ErrorType::QuantumError {
+        if state.amplitude < self.Core_threshold {
+            let error_type = ErrorType::CoreError {
                 state_id: state.id.clone(),
                 amplitude: state.amplitude,
-                expected_amplitude: self.quantum_threshold,
+                expected_amplitude: self.Core_threshold,
                 interference_score: self.calculate_interference_score(state),
             };
 
@@ -522,11 +523,11 @@ impl ErrorAnalyzer {
                 propagation_path,
                 component_id: None,
                 related_component_id: None,
-                category: ErrorCategory::QuantumState,
-                description: format!("Некорректное квантовое состояние: амплитуда {} < {}", state.amplitude, self.quantum_threshold),
+                category: ErrorCategory::CoreState,
+                description: format!("Некорректное квантовое состояние: амплитуда {} < {}", state.amplitude, self.Core_threshold),
                 stack_trace: None,
                 system_state: HashMap::new(),
-                quantum_state: Some(state.superposition.iter().enumerate().map(|(i, vector)| (i.to_string(), vector.probability)).collect()),
+                Core_state: Some(state.superposition.iter().enumerate().map(|(i, vector): (usize, &crate::core::field::StateVector)| (i.to_string(), vector.probability)).collect()),
                 shard_info: None,
                 consensus_data: None,
             };
@@ -539,6 +540,7 @@ impl ErrorAnalyzer {
             None
         }
     }
+    */
 
     fn determine_error_severity(&self, error_type: &ErrorType) -> ErrorSeverity {
         match error_type {
@@ -549,7 +551,7 @@ impl ErrorAnalyzer {
                     _ => ErrorSeverity::Low,
                 }
             },
-            ErrorType::QuantumError { amplitude, .. } => {
+            ErrorType::CoreError { amplitude, .. } => {
                 if *amplitude < 0.3 {
                     ErrorSeverity::Critical
                 } else if *amplitude < 0.5 {
@@ -566,10 +568,10 @@ impl ErrorAnalyzer {
     fn identify_affected_components(&self, error_type: &ErrorType) -> Vec<String> {
         match error_type {
             ErrorType::TransactionError { .. } => {
-                vec!["transaction_processor".to_string(), "quantum_field".to_string()]
+                vec!["transaction_processor".to_string(), "Core_field".to_string()]
             },
-            ErrorType::QuantumError { .. } => {
-                vec!["quantum_field".to_string(), "interference_engine".to_string()]
+            ErrorType::CoreError { .. } => {
+                vec!["Core_field".to_string(), "interference_engine".to_string()]
             },
             ErrorType::SemanticError { .. } => {
                 vec!["semantic_engine".to_string(), "transaction_processor".to_string()]
@@ -585,13 +587,13 @@ impl ErrorAnalyzer {
             ErrorType::TransactionError { .. } => {
                 vec![
                     "transaction_processor".to_string(),
-                    "quantum_field".to_string(),
+                    "Core_field".to_string(),
                     "consensus_engine".to_string(),
                 ]
             },
-            ErrorType::QuantumError { .. } => {
+            ErrorType::CoreError { .. } => {
                 vec![
-                    "quantum_field".to_string(),
+                    "Core_field".to_string(),
                     "interference_engine".to_string(),
                     "transaction_processor".to_string(),
                 ]
@@ -600,7 +602,7 @@ impl ErrorAnalyzer {
                 vec![
                     "semantic_engine".to_string(),
                     "transaction_processor".to_string(),
-                    "quantum_field".to_string(),
+                    "Core_field".to_string(),
                 ]
             },
             ErrorType::SystemError { .. } => {
@@ -609,12 +611,14 @@ impl ErrorAnalyzer {
         }
     }
 
-    fn calculate_interference_score(&self, state: &QuantumState) -> f64 {
+    /* LEGACY: CoreState removed
+    fn calculate_interference_score(&self, state: &CoreState) -> f64 {
         // Простой расчет интерференционного скора на основе суперпозиции
         state.superposition.iter()
             .map(|vector| vector.probability)
             .sum::<f64>() / state.superposition.len() as f64
     }
+    */
 
     fn update_error_patterns(&mut self, context: &ErrorContext) {
         let pattern_key = self.generate_pattern_key(&context.error_type);
@@ -626,7 +630,7 @@ impl ErrorAnalyzer {
     fn generate_pattern_key(&self, error_type: &ErrorType) -> String {
         match error_type {
             ErrorType::TransactionError { status, .. } => format!("tx_{:?}", status),
-            ErrorType::QuantumError { .. } => "quantum".to_string(),
+            ErrorType::CoreError { .. } => "Core".to_string(),
             ErrorType::SemanticError { .. } => "semantic".to_string(),
             ErrorType::SystemError { component, .. } => format!("system_{}", component),
         }
@@ -643,11 +647,11 @@ impl ErrorAnalyzer {
 
     pub fn ai_predict_error(&self, context: ErrorContext, ai: Option<&ErrorAI>) -> ErrorType {
         if let Some(ai) = ai {
-            // Пример: используем Random Forest для предсказания вероятности QuantumError
+            // Пример: используем Random Forest для предсказания вероятности CoreError
             let features = vec![context.severity as u8 as f32]; // Можно расширить набор признаков
             let score = ai.predict_error(features.iter().map(|&f| f as f64).collect());
             if score == 1 {
-                ErrorType::QuantumError {
+                ErrorType::CoreError {
                     state_id: String::new(),
                     amplitude: 0.0,
                     expected_amplitude: 0.0,
@@ -662,8 +666,8 @@ impl ErrorAnalyzer {
             }
         } else {
             // Placeholder ML model
-            if context.description.contains("quantum") {
-                ErrorType::QuantumError {
+            if context.description.contains("Core") {
+                ErrorType::CoreError {
                     state_id: "predicted".to_string(),
                     amplitude: 0.5,
                     expected_amplitude: 1.0,
@@ -697,7 +701,7 @@ impl ErrorAnalyzer {
             0 => Ok(ErrorType::TransactionError {
                 transaction_id: "".to_string(),
                 status: TransactionStatus::Failed,
-                quantum_state: None,
+                Core_state: None,
                 error_message: "Predicted error".to_string()
             }),
             _ => Ok(ErrorType::SystemError {
@@ -708,3 +712,5 @@ impl ErrorAnalyzer {
         }
     }
 } 
+
+

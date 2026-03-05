@@ -2,13 +2,13 @@ use std::env;
 use std::sync::Arc;
 
 use tokio::signal;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 use env_logger::Env;
 use log::{error, info};
 
-use triad::network::{LibP2PDiscoveryService, PeerManager};
 use triad::network::types::NetworkEvent;
+use triad::network::{LibP2PDiscoveryService, PeerManager};
 
 #[tokio::main]
 async fn main() {
@@ -25,7 +25,8 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(4002);
 
-    info!("Starting triad-node: name={}, quic_port={}, bootstrap_mode={} (TRIAD_BOOTSTRAP)",
+    info!(
+        "Starting triad-node: name={}, quic_port={}, bootstrap_mode={} (TRIAD_BOOTSTRAP)",
         node_name,
         quic_port,
         env::var("TRIAD_BOOTSTRAP").unwrap_or_else(|_| "0".into())
@@ -77,3 +78,5 @@ async fn main() {
 
     info!("triad-node stopped");
 }
+
+

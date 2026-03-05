@@ -1,6 +1,6 @@
 use crate::{
-    transaction::{Transaction, TransactionProcessor, TransactionStorage, SmartContract, QuantumSmartContractProcessor, ContractStatus},
-    quantum::consensus::{ConsensusNode, ConsensusMessage, ConsensusState},
+    transaction::{Transaction, TransactionProcessor, TransactionStorage, SmartContract, CoreSmartContractProcessor, ContractStatus},
+    Core::consensus::{ConsensusNode, ConsensusMessage, ConsensusState},
     error_analysis::{ErrorAnalyzer, ErrorContext},
     semantic::{SemanticEngine, SemanticAction},
     sharding::ShardEvent,
@@ -114,7 +114,7 @@ impl NetworkNode {
             _ => None,
         };
         if let Some(json) = entity_json {
-            // Quantum consensus
+            // Core consensus
             // You can log/save the result
             if let Ok(mut consensus) = self.consensus.lock() {
                 let consensus_result = consensus.validate_entity(&json);
@@ -142,10 +142,11 @@ impl NetworkNode {
                     let state_id = transaction.id.to_string();
                     // Add state to the node's field
                     let consensus_message = ConsensusMessage {
-                        sender_id: self.config.id.clone(),
-                        state_id: state_id.clone(),
+                        sender_id: message.sender.clone(),
+                        state_id: transaction.id.to_string(),
                         raw_data: Bytes::from(transaction.data.clone()),
-                        signature: vec![],
+                        signature: vec![], // Assuming transaction doesn't have a signature field directly here
+                        public_key: None, // TODO: Extract from msg or network registry
                     };
                     let pk = consensus.public_key.clone();
                     let _ = consensus.process_message(consensus_message, &pk);
@@ -225,9 +226,9 @@ impl NetworkNode {
                 // Apply action to transaction
                 println!("Applying action to transaction: {}", action);
             }
-            crate::semantic::ActionType::QuantumAction { operation, .. } => {
-                // Apply quantum action
-                println!("Applying quantum action: {}", operation);
+            crate::semantic::ActionType::CoreAction { operation, .. } => {
+                // Apply Core action
+                println!("Applying Core action: {}", operation);
             }
             crate::semantic::ActionType::SystemAction { action, .. } => {
                 // Apply system action
@@ -237,13 +238,13 @@ impl NetworkNode {
     }
 
     fn process_smart_contract(&mut self, mut contract: SmartContract) {
-        // Quantum deployment through processor
-        let processor = QuantumSmartContractProcessor;
+        // Core deployment through processor
+        let processor = CoreSmartContractProcessor;
         if let Err(e) = processor.deploy(&mut contract) {
             contract.status = ContractStatus::Failed;
             // You can log the error
         }
-        // TODO: Quantum consensus (similar to transactions)
+        // TODO: Core consensus (similar to transactions)
         // self.consensus.lock().unwrap().validate_contract(&contract);
         // Save contract
         self.contracts.push(contract);
@@ -289,3 +290,5 @@ impl NetworkNode {
         Some(Arc::clone(&self.semantic_engine))
     }
 } 
+
+

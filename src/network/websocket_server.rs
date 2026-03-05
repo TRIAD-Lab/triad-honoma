@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 use rand::Rng;
 use rayon::prelude::*;
 
-use crate::quantum::{QuantumField, InterferenceEngine, QuantumWave};
+use crate::core::{CoreField, InterferenceEngine, CoreWave};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WebSocketMessage {
@@ -44,8 +44,8 @@ pub struct WebSocketServer {
     pub node_id: String,
     pub port: u16,
     pub shard_id: usize,
-    pub quantum_field: Arc<Mutex<QuantumField>>,
-    pub interference_engine: Arc<Mutex<InterferenceEngine>>,
+    pub Core_field: Arc<Mutex<CoreField>>,
+    pub interference_engine: Arc<InterferenceEngine>,
     pub accounts: Arc<RwLock<HashMap<String, f64>>>,
     #[cfg(feature = "opencl")]
     pub gpu_context: Option<Arc<GPUContext>>,
@@ -66,8 +66,8 @@ impl WebSocketServer {
             node_id,
             port,
             shard_id,
-            quantum_field: Arc::new(Mutex::new(QuantumField::new())),
-            interference_engine: Arc::new(Mutex::new(InterferenceEngine::new(2000, 0.01))), // Оптимизируем для батчей по 2000
+            Core_field: Arc::new(Mutex::new(CoreField::new())),
+            interference_engine: Arc::new(InterferenceEngine::new(2000, 0.01)), // Оптимизируем для батчей по 2000
             accounts: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "opencl")]
             gpu_context: Self::init_gpu_context()?,
@@ -167,7 +167,7 @@ impl WebSocketServer {
             node_id: self.node_id.clone(),
             port: self.port,
             shard_id: self.shard_id,
-            quantum_field: Arc::clone(&self.quantum_field),
+            Core_field: Arc::clone(&self.Core_field),
             interference_engine: Arc::clone(&self.interference_engine),
             accounts: Arc::clone(&self.accounts),
             #[cfg(feature = "opencl")]
@@ -261,9 +261,9 @@ impl WebSocketServer {
         
         // ФАЗА 1: Создание квантовых волн из транзакций - ОПТИМИЗИРОВАННАЯ
         let t0 = std::time::Instant::now();
-        let waves: Vec<QuantumWave> = message.transactions.par_iter()
+        let waves: Vec<CoreWave> = message.transactions.par_iter()
             .enumerate()
-            .map(|(index, tx_data)| Self::create_quantum_wave_from_transaction(tx_data, index))
+            .map(|(index, tx_data)| Self::create_Core_wave_from_transaction(tx_data, index))
             .collect();
         waves_count = waves.len();
         t_collect_ms = t0.elapsed().as_millis();
@@ -272,39 +272,32 @@ impl WebSocketServer {
             // ФАЗА 2: Расчет квантовой интерференции - ОПТИМИЗИРОВАННАЯ
             let t1 = std::time::Instant::now();
             let (interference_valid, analysis) = {
-                let mut field = self.quantum_field.lock();
+                let mut field = self.Core_field.lock();
 
                 // ОПТИМИЗАЦИЯ: Добавляем волны батчами для ускорения
                 let batch_size = 1000;
                 for (batch_idx, wave_batch) in waves.chunks(batch_size).enumerate() {
                     for (index, wave) in wave_batch.iter().enumerate() {
+                        let wave: &CoreWave = wave;
                         field.add_wave(format!("ws-batch-{}-{}", batch_idx, index), wave.clone());
                     }
                 }
 
-                let mut engine = self.interference_engine.lock();
+                let engine = &self.interference_engine;
 
                 // ОПТИМИЗАЦИЯ: Используем OpenCL если доступен
-                let pattern = if cfg!(feature = "opencl") {
-                    // Создаем QuantumState из QuantumWave
-                    let quantum_states: Vec<_> = waves.iter().map(|w| {
-                        crate::quantum::field::QuantumState::new(
-                            w.id.to_string(),
-                            w.amplitude,
-                            w.phase,
-                            w.shard_id.clone(),
-                            w.superposition.clone()
-                        )
-                    }).collect();
-                    engine.calculate_interference_auto(&quantum_states)
-                } else {
-                    engine.calculate_interference_from_field(&field)
+                let pattern = {
+                    let time = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs_f64();
+                    engine.calculate_interference_auto(&waves, time)
                 };
                 
                 let analysis = engine.analyze_interference(&pattern);
                 
                 // ОПТИМИЗАЦИЯ: Более быстрые пороги для высокого TPS
-                let valid = analysis.constructive_points.len() >= 1 
+                let valid = analysis.constructive_count >= 1 
                     || analysis.average_amplitude >= 0.00001; // Снижаем порог
                 
                 // Log GPU acceleration status
@@ -318,7 +311,7 @@ impl WebSocketServer {
             // Отладочная информация об интерференции
             println!("🔍 Interference Analysis: avg_amp={:.4}, max_amp={:.4}, constructive={}, destructive={}, valid={}", 
                 analysis.average_amplitude, analysis.max_amplitude, 
-                analysis.constructive_points.len(), analysis.destructive_points.len(), interference_valid);
+                analysis.constructive_count, analysis.destructive_count, interference_valid);
 
             // ФАЗА 3: Валидация транзакций - ОПТИМИЗИРОВАННАЯ
             let t2 = std::time::Instant::now();
@@ -357,7 +350,7 @@ impl WebSocketServer {
         
         // ВЫВОД ПОЛНОЦЕННЫХ МЕТРИК
         println!("╭─────────────────────────────────────────────────────────────────────────╮");
-        println!("│ 🧪 QUANTUM CONSENSUS BATCH PROCESSING METRICS                          │");
+        println!("│ 🧪 Core CONSENSUS BATCH PROCESSING METRICS                          │");
         println!("├─────────────────────────────────────────────────────────────────────────┤");
         println!("│ 📊 Batch Size: {} transactions", format!("{:>6}", batch_size));
         println!("│ ⚡ Total Time: {}ms", format!("{:>6}", processing_time.as_millis()));
@@ -406,10 +399,10 @@ impl WebSocketServer {
         
         // 95% успешных транзакций (как в проекте)
         let success_rate = 0.95;
-        rng.gen::<f64>() < success_rate
+        rng.r#gen::<f64>() < success_rate
     }
 
-    fn create_quantum_wave_from_transaction(transaction_data: &[u8], index: usize) -> QuantumWave {
+    fn create_Core_wave_from_transaction(transaction_data: &[u8], index: usize) -> CoreWave {
         use rand::Rng;
         let mut rng = rand::thread_rng();
         
@@ -425,17 +418,17 @@ impl WebSocketServer {
         
         let amplitude = (amount / 100.0).clamp(0.1, 1.0);
         let phase = (index as f64 * std::f64::consts::PI / 50.0) % (2.0 * std::f64::consts::PI);
-        let shard_id = format!("shard-{}", index % 3);
+        let shard_id = (index % 3) as u8;
         
         // Создаем superposition как в проекте
         let superposition = vec![
-            crate::quantum::field::StateVector {
+            crate::core::field::StateVector {
                 value: num_complex::Complex::new(amplitude, 0.0),
                 probability: 1.0,
             }
         ];
         
-        QuantumWave::new(
+        CoreWave::new(
             format!("tx-{}", index),
             amplitude,
             phase,
@@ -444,3 +437,6 @@ impl WebSocketServer {
         )
     }
 }
+
+
+

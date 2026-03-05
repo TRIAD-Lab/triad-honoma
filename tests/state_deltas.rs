@@ -1,7 +1,9 @@
-use triad::tvm::state::{StateView, WriteBatch};
 use std::thread;
+use triad::tvm::state::{StateView, WriteBatch};
 
-fn key(s: &str) -> Vec<u8> { s.as_bytes().to_vec() }
+fn key(s: &str) -> Vec<u8> {
+    s.as_bytes().to_vec()
+}
 
 #[test]
 fn state_deltas_increments() {
@@ -15,7 +17,9 @@ fn state_deltas_increments() {
             wb
         }));
     }
-    for h in handles { state.put_batch(&h.join().unwrap()); }
+    for h in handles {
+        state.put_batch(&h.join().unwrap());
+    }
     let v = state.get(&key("k")).unwrap_or_default();
     let mut arr = [0u8; 16];
     arr.copy_from_slice(&v[..16]);
@@ -43,7 +47,9 @@ fn state_deltas_inc_dec_mix() {
             wb
         }));
     }
-    for h in handles { state.put_batch(&h.join().unwrap()); }
+    for h in handles {
+        state.put_batch(&h.join().unwrap());
+    }
     let v = state.get(&key("m")).unwrap_or_default();
     let mut arr = [0u8; 16];
     arr.copy_from_slice(&v[..16]);

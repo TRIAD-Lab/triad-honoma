@@ -1,59 +1,213 @@
+[workspace]
+resolver = "2"
+members = [
+    "src/sdk",
+    "src/sdk/program",
+    "src/sdk/macro",
+    "src/logger",
+    "src/trvm/program-runtime",
+    "src/trvm/frozen-abi",
+    "src/trvm/version",
+    "src/trvm/entry",
+    "src/programs/compute-budget",
+]
+
+[workspace.package]
+version = "1.1.0"
+authors = ["Михаил"]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/triad-network/triad"
+homepage = "https://triad.network"
+
+[workspace.dependencies]
+# Internal members
+solana-sdk = { path = "src/sdk" }
+solana-program = { path = "src/sdk/program" }
+solana-program-runtime = { path = "src/trvm/program-runtime" }
+solana-frozen-abi = { path = "src/trvm/frozen-abi" }
+solana-frozen-abi-macro = { path = "src/trvm/frozen-abi/macro" }
+solana-sdk-macro = { path = "src/sdk/macro" }
+solana-logger = { path = "src/logger" }
+
+# Common Solana dependencies
+ahash = "0.8.7"
+anyhow = "1.0.79"
+ark-bn254 = "0.4.0"
+ark-ec = "0.4.0"
+ark-ff = "0.4.0"
+ark-serialize = "0.4.0"
+arrayref = "0.3.7"
+assert_matches = "1.5.0"
+async-trait = "0.1.77"
+base64 = "0.21.7"
+bincode = "1.3.3"
+bitflags = { version = "2.4.2", features = ["serde"] }
+blake3 = "1.5.0"
+borsh = { version = "1.2.1", features = ["derive", "unstable__schema"] }
+bs58 = "0.4.0"
+bv = "0.11.1"
+bytemuck = "1.14.0"
+byteorder = "1.5.0"
+bytes = "1.5"
+chrono = { version = "0.4.31", default-features = false }
+crossbeam-channel = "0.5.11"
+curve25519-dalek = "3.2.1"
+dashmap = "5.5.3"
+derivation-path = { version = "0.2.0", default-features = false }
+digest = "0.10.7"
+eager = "0.1.0"
+ed25519-dalek = "=1.0.1"
+ed25519-dalek-bip32 = "0.2.0"
+enum-iterator = "1.5.0"
+env_logger = "0.9.3"
+futures = "0.3.30"
+generic-array = { version = "0.14.7", default-features = false }
+hex = "0.4.3"
+hmac = "0.12.1"
+itertools = "0.10.5"
+lazy_static = "1.4.0"
+libc = "0.2.152"
+libsecp256k1 = "0.6.0"
+log = "0.4.20"
+memmap2 = "0.5.10"
+memoffset = "0.9"
+num-derive = "0.4"
+num-traits = "0.2.17"
+num_enum = "0.7.2"
+once_cell = "1.19"
+pbkdf2 = { version = "0.11", default-features = false }
+percentage = "0.1.0"
+qstring = "0.7.2"
+qualifier_attr = "0.2.0"
+rand = "0.8.5"
+rustc_version = "0.4"
+rustversion = "1.0"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_bytes = "0.11"
+serde_derive = "1.0"
+serde_json = "1.0"
+serde_with = { version = "3.6", features = ["macros"] }
+sha2 = "0.10.8"
+sha3 = "0.10.8"
+siphasher = "0.3"
+solana-measure = "1.18.12"
+solana-metrics = "1.18.12"
+solana_rbpf = "0.8.0"
+static_assertions = "1.1"
+thiserror = "1.0"
+tiny-bip39 = "0.8.2"
+uriparse = "0.6.4"
+wasm-bindgen = "0.2"
+js-sys = "0.3.67"
+array-bytes = "=1.4.1"
+light-poseidon = "0.2.0"
+num-bigint = "0.4.4"
+zeroize = "1.3"
+console_error_panic_hook = "0.1.7"
+console_log = "0.2.2"
+block-buffer = "0.10.4"
+either = "1.9.0"
+im = "15.1.0"
+subtle = "2.4.1"
+dlopen2 = "0.6.1"
+solana-perf = "1.18.12"
+solana-merkle-tree = "1.18.12"
+solana-rayon-threadlimit = "1.18.12"
+semver = "1.0.17"
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = "2.0"
+cc = "1.0"
+parking_lot = "0.12"
+getrandom = "0.2.10"
+rayon = "1.10"
+
 [package]
 name = "triad"
-version = "1.1.0"
-edition = "2021"
-authors = ["Михаил"]
-description = "TRIAD - Квантово-вдохновленная распределенная сеть следующего поколения"
-license = "MIT"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description = "TRIAD - Next-gen quantum-inspired distributed network"
+license.workspace = true
 readme = "README.md"
 
 [dependencies]
 # Математические библиотеки
-num-complex = { version = "0.4", features = ["serde"] }  # Для работы с комплексными числами (квантовые амплитуды)
-nalgebra = "0.32.3"    # Для матричных операций
+num-complex = { version = "0.4", features = ["serde"] }
+nalgebra = "0.32.3"
 rand = "0.8.5"
 rand_core = "0.6"
-ed25519-dalek = "2"
-ed25519-zebra = { version = "2", optional = true }
-rand_core_05 = { package = "rand_core", version = "0.5" }
-rand07 = { package = "rand", version = "0.7" }
+rand_chacha = "0.3"
+
+# Crypto libraries (Phase 1 & 2)
+blst = "0.3.16"  # Production BLS12-381 (thread-safe, Ethereum 2.0)
+ark-poly = "0.4"  # Phase 2: STARK proofs only
+ark-ff = "0.4"    # Required for STARK proofs field arithmetic
+ark-std = "0.4"   # Required for STARK proofs
+arc-swap = "1.7"
+curve25519-dalek = "4"  # Ristretto (no separate feature needed in v4)
+blake3 = "1.5"
+
 
 # Сериализация/десериализация
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Сетевые библиотеки
-tokio = { version = "1.28", features = ["full"] }
-libp2p = { version = "0.51.0", features = ["tcp", "dns", "quic", "noise", "yamux", "ping", "identify", "kad", "gossipsub", "autonat", "relay", "dcutr", "macros", "request-response"] }
+# Extreme Performance Stack (Phase 3)
+qcell = "0.5"
+postcard = { version = "1.0", features = ["use-std"] }
+zerocopy = { version = "0.7", features = ["derive"] }
+ahash = { version = "0.8", features = ["serde"] }
+monoio = "0.2" # Cross-platform (io_uring on Linux, kqueue/IOCP on others)
+
+smallvec = "1.11"
+slotmap = "1.0"
+flume = "0.11"
+uuid = { version = "1.4", features = ["v4", "fast-rng", "serde"] }
+
+# Сетевые библиотеки (Optimized)
+# Tokio fallback needs full features for macOS/Windows dev
+tokio = { version = "1.28", features = ["full"] } 
+libp2p = { version = "0.51.0", default-features = false, features = ["tcp", "dns", "quic", "noise", "identify", "ping", "gossipsub", "macros", "kad", "autonat", "relay", "dcutr", "yamux", "request-response", "secp256k1"] }
 libp2p-tcp = { version = "0.39.0", features = ["tokio"] }
 libp2p-quic = { version = "0.7.0-alpha.3", features = ["tokio"] }
 
-# Optional WebRTC fallback (only compiled when feature `webrtc` is enabled)
-libp2p-webrtc = { version = "0.9.0-alpha.1", optional = true }
+# Phase 4: Quinn (QUIC) with BBR Congestion Control
+# Phase 4: Quinn (QUIC) with BBR Congestion Control
+quinn = "0.10"
+rustls = { version = "0.21", default-features = false, features = ["dangerous_configuration"] }
+
+
+rcgen = "0.13" # Certificate generation for QUIC
+
 
 # Утилиты
 log = "0.4"
 env_logger = "0.10"
 thiserror = "1.0"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-tracing-log = "0.1"
+# tracing removed from hot path
 crossbeam-channel = "0.5"
-ahash = "0.8"
 solana_rbpf = { version = "0.8", default-features = false }
 wasmtime = { version = "14", optional = true }
-sha2 = "0.10"
 bincode = "1"
 parking_lot = "0.12"
-dashmap = "5"
-bytes = { version = "1", features = ["serde"] }
+mimalloc = { version = "0.1", default-features = false }
 wide = "0.7"
+bytes = { version = "1", features = ["serde"] }
+libc = "0.2"
+dashmap = "5" # Temporary, will be replaced by QCell
+core_affinity = "0.8" # Phase 4: CPU core pinning
+
 
 # Дополнительные зависимости
 clap = { version = "4.4.10", features = ["derive"] }
 plotters = "0.3.5"
-rayon = "1.7"  # Для параллельной обработки
+rayon = "1.10"
 num_cpus = "1.16"
+once_cell = "1.19"
+
 
 # Async traits
 async-trait = "0.1"
@@ -65,56 +219,54 @@ axum = "0.7"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors"] }
 
-uuid = { version = "1.4.1", features = ["v4", "v5", "serde"] }
-local-ip-address = "0.5"
 
-# Добавляем новые зависимости
+local-ip-address = "0.5"
 reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
 lazy_static = "1.4"
-
-
 
 # Token and ledger enhancements
 rocksdb = "0.21"
 
-# High-throughput enhancements
-blsful = "3.0.0-pre8"  # For aggregated signatures
-quinn = "0.10"  # For fast network transport (QUIC) - compatible with rustls 0.20
-rustls = "0.21"  # For QUIC TLS compatibility with quinn 0.10
-rcgen = "0.11"  # For certificate generation compatibility
-
 # Compression libraries
-zstd = "0.12"  # For Zstandard compression
-lz4_flex = "0.9"  # For LZ4 compression
-brotli = "3.3"  # For Brotli compression
+zstd = "0.12"
+lz4_flex = "0.9"
+brotli = "3.3"
 
 # Innovation enhancements
-tensorflow = { version = "0.21.0", optional = true }  # For ML in semantic/error; optional to avoid runtime dylib when not used
-bellman = "0.13"  # For ZK-SNARKs
-schnorrkel = "0.10"  # For advanced Schnorr signatures
+tensorflow = { version = "0.21.0", optional = true }
+bellman = "0.13"
 
 # Advanced features
-cust = { version = "0.3.2", optional = true }  # CUDA
-ocl = { version = "0.19", optional = true }  # OpenCL
-smartcore = { version = "0.3.2", features = ["serde"] }  # ML для динамического шардинга
+cust = { version = "0.3.2", optional = true }
+ocl = { version = "0.19", optional = true }
+smartcore = { version = "0.3.2", features = ["serde"] }
 
 # WebSocket support
 tokio-tungstenite = "0.20"
 
 [features]
-default = ["zebra_batch", "rbpf_vm"]
+default = ["simd"]
+simd = ["portable_simd"]
+portable_simd = []
+avx512 = ["simd"]
+neon = ["simd"]
+# VM Features
 wasm = ["wasmtime"]
 rbpf_vm = []
+# GPU Features
 cuda = ["cust"]
 opencl = ["ocl"]
-webrtc = ["libp2p-webrtc"]
+# Benchmark Features
+benchmark-skip-bls = []  # Skip BLS verification for architectural benchmarking
+# Network Features
+# Core Features
 consensus = []
 processor = []
-zebra_batch = ["ed25519-zebra"]
+zebra_batch = [] # Removed ed25519-zebra dependency
 demo_example = []
 
 [dev-dependencies]
-criterion = "0.5.1"    # Для бенчмарков
+criterion = "0.5.1"
 tokio-test = "0.4"
 proptest = "1"
 

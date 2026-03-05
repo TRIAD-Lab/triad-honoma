@@ -1,4 +1,4 @@
-use crate::quantum::consensus::{ConsensusNode, ConsensusMessage};
+use crate::core::consensus::{ConsensusNode, ConsensusMessage};
 use super::{Shard, assign_shard};
 use rayon::prelude::*;
 use bytes::Bytes;
@@ -14,9 +14,16 @@ fn test_sharding_parallel_processing() {
         .map(|shard_id| {
             let nodes = (0..nodes_per_shard)
                 .map(|i| {
-                    let node_id = format!("shard{}_node{}", shard_id, i);
-                    let shard_id = assign_shard(&node_id, num_shards);
-                    ConsensusNode::new(node_id, shard_id)
+                    let node_id_str = format!("shard{}_node{}", shard_id, i);
+                    let shard_id_u8 = assign_shard(&node_id_str, num_shards);
+                    // Generate a deterministic u128 ID from the string
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    use std::hash::Hash;
+                    use std::hash::Hasher;
+                    node_id_str.hash(&mut hasher);
+                    let node_id_u128 = hasher.finish() as u128;
+                    
+                    ConsensusNode::new(node_id_u128, shard_id_u8)
                 })
                 .collect();
             Shard::new(shard_id, nodes)
@@ -46,3 +53,5 @@ fn test_sharding_parallel_processing() {
         shard.process_messages(&all_shard_messages[shard_id]);
     });
 } 
+
+

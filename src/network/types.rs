@@ -109,3 +109,4 @@ pub enum NetworkEvent {
     PeerDisconnected(uuid::Uuid),
     // Other events can be added as needed
 } 
+

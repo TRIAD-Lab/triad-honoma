@@ -3,18 +3,18 @@ use parking_lot::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel as xchan;
+use flume as xchan;
 use rayon::prelude::*;
-use tracing::warn;
-use sha2::{Sha256, Digest};
+use log::warn;
+use blake3::Hasher;
 use dashmap::DashMap;
 use bytes::Bytes;
  
 
 use crate::pipeline::config::PipelineConfig;
 use crate::pipeline::metrics::StageMetrics;
-use crate::quantum::consensus::{ConsensusMessage, ConsensusNode};
-use crate::quantum::field::WaveValidationResult;
+use crate::core::consensus::{ConsensusMessage, ConsensusNode};
+use crate::core::field::WaveValidationResult;
 use crate::tvm::{Tvm, TvmConfig, scheduler::{Scheduler, BatchItem}, state::{StateView, KeyAccess}, ExecEnvelope};
 use crate::tvm::loader::{TvmProgram, load_program};
 use crate::transaction::Transaction;
@@ -81,7 +81,7 @@ impl Pipeline {
                 let rx = ing_rx.clone();
                 let tx = ver_tx.clone();
                 let m = m_verify.clone();
-                let consensus = Arc::clone(&consensus);
+                let consensus: Arc<parking_lot::Mutex<ConsensusNode>> = Arc::clone(&consensus);
                 thread::spawn(move || {
                     loop {
                         match rx.recv() {
@@ -98,7 +98,7 @@ impl Pipeline {
                                     let mut ok_cnt = 0usize;
                                     for msg in &benv.messages {
                                         let mut cons = consensus.lock();
-                                        let vk = cons.public_key.clone();
+                                        let vk = cons.keypair.public;
                                         // Принимаем, если подпись валидна, и добавляем волну в поле
                                         if cons.process_message(msg.clone(), &vk).is_ok() { ok_cnt += 1; }
                                     }
@@ -198,7 +198,7 @@ impl Pipeline {
 
                             // Простейший расчёт результата по интерференции: влияет на уровень амплитуд
                             let mut amplitude_updates: std::collections::HashMap<std::sync::Arc<str>, WaveValidationResult> =
-                                std::collections::HashMap::with_capacity(waves_snapshot.len());
+                                std::collections::HashMap::<std::sync::Arc<str>, WaveValidationResult>::with_capacity(waves_snapshot.len());
                             for w in &waves_snapshot {
                                 // Сюда можно подключить DAG/fee-приоритизацию; для производительности опускаем лишние аллокации
                                 let res = if analysis.average_amplitude > 0.0 {
@@ -226,9 +226,11 @@ impl Pipeline {
                             for group in scheduled.groups.into_iter() {
                                 // Параллельное исполнение независимых групп
                                 let results: Vec<(crate::tvm::TvmExecutionResult, crate::tvm::state::WriteBatch)> = group.par_iter().map(|it| {
-                                    // Загрузка программы из payload (ELF) через кэш по SHA-256 кода
+                                    // Загрузка программы из payload (ELF) через кэш по хэшу Blake3
                                     let bytes_ref: &[u8] = it.payload.as_ref();
-                                    let mut hasher = Sha256::new(); hasher.update(bytes_ref); let key: [u8;32] = hasher.finalize().into();
+                                    let mut hasher = Hasher::new();
+                                    hasher.update(bytes_ref);
+                                    let key: [u8;32] = *hasher.finalize().as_bytes();
                                     let program_arc_opt: Option<Arc<TvmProgram>> = if let Some(entry) = prog_cache.get(&key) {
                                         Some(entry.value().clone())
                                     } else {
@@ -239,7 +241,7 @@ impl Pipeline {
                                                 Some(arc)
                                             },
                                             Err(e) => {
-                                                warn!(target="pipeline", "TVM load failed for {}: {}", it.id, e);
+                                                log::warn!("TVM load failed for {}: {}", it.id, e);
                                                 None
                                             }
                                         }
@@ -324,9 +326,9 @@ impl Pipeline {
                     let (_, fb) = parse_key_access_and_fee(&bmsg.raw_data);
                     fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal)
                 });
-                let env = BatchEnvelope { messages: out, enqueued_at: Instant::now() };
-                if let Err(e) = self.ing_tx.send(env) {
-                    warn!(target="pipeline", "ingress send failed: {}", e);
+                let BatchEnvelope { messages, enqueued_at } = BatchEnvelope { messages: out, enqueued_at: Instant::now() };
+                if let Err(e) = self.ing_tx.send(BatchEnvelope { messages, enqueued_at }) {
+                    log::warn!("ingress send failed: {}", e);
                 }
             }
         });
@@ -410,3 +412,6 @@ fn key_access_from_envelope(env: &ExecEnvelope) -> (KeyAccess, f64) {
     }
     (acc, env.meta.fee)
 }
+
+
+

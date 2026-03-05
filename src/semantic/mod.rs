@@ -4,12 +4,12 @@ use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 use crate::transaction::{Transaction, TransactionStatus};
 use crate::error_analysis::{ErrorType, ErrorContext};
-use crate::quantum::field::QuantumState;
+// use crate::core::field::CoreState; // LEGACY: CoreState removed
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SystemGoal {
     // Main system goals
-    QuantumConsensus {
+    CoreConsensus {
         target_tps: u64,
         energy_efficiency: f64,
         security_level: f64,
@@ -59,11 +59,11 @@ pub struct Constraint {
 pub enum SemanticContext {
     TransactionContext {
         transaction: Transaction,
-        quantum_state: Option<QuantumState>,
+        Core_state: Option<String>, // Changed from Option<CoreState>
         error_context: Option<ErrorContext>,
     },
-    QuantumContext {
-        state: QuantumState,
+    CoreContext {
+        state: String, // Changed from CoreState
         expected_behavior: String,
         actual_behavior: String,
     },
@@ -88,7 +88,7 @@ pub enum ActionType {
         transaction_id: String,
         parameters: HashMap<String, f64>,
     },
-    QuantumAction {
+    CoreAction {
         operation: String,
         state_id: String,
         parameters: HashMap<String, f64>,
@@ -140,9 +140,9 @@ impl SemanticEngine {
         let current_state = self.analyze_system_state();
         
         match &current_state.current_goal {
-            SystemGoal::QuantumConsensus { target_tps, energy_efficiency, security_level } => {
-                // Plan actions to achieve quantum consensus
-                self.plan_quantum_action(target_tps, energy_efficiency, security_level)
+            SystemGoal::CoreConsensus { target_tps, energy_efficiency, security_level } => {
+                // Plan actions to achieve Core consensus
+                self.plan_Core_action(target_tps, energy_efficiency, security_level)
             },
             SystemGoal::ShardOptimization { target_shards, load_balance, sync_speed } => {
                 // Plan actions to optimize sharding
@@ -155,7 +155,7 @@ impl SemanticEngine {
         }
     }
 
-    fn plan_quantum_action(&self, target_tps: &u64, energy_efficiency: &f64, security_level: &f64) -> Option<SemanticAction> {
+    fn plan_Core_action(&self, target_tps: &u64, energy_efficiency: &f64, security_level: &f64) -> Option<SemanticAction> {
         // Analyze current metrics
         let current_tps = self.current_state.metrics.get("tps").unwrap_or(&0.0);
         let current_efficiency = self.current_state.metrics.get("energy_efficiency").unwrap_or(&0.0);
@@ -165,7 +165,7 @@ impl SemanticEngine {
         if current_tps < &(*target_tps as f64) {
             Some(SemanticAction {
                 entity_id: "qubit_0".to_string(),
-                action_type: "optimize_quantum_state".to_string(),
+                action_type: "optimize_Core_state".to_string(),
                 details: Some(format!("target_tps: {}, current_tps: {}", target_tps, current_tps)),
             })
         } else if current_efficiency < energy_efficiency {
@@ -214,7 +214,7 @@ impl SemanticEngine {
     fn update_metrics(&mut self) {
         // Update system metrics based on current state
         match &self.current_state.current_goal {
-            SystemGoal::QuantumConsensus { target_tps, energy_efficiency, security_level } => {
+            SystemGoal::CoreConsensus { target_tps, energy_efficiency, security_level } => {
                 self.current_state.metrics.insert("tps".to_string(), 0.0); // Real metric should be here
                 self.current_state.metrics.insert("energy_efficiency".to_string(), 0.0);
                 self.current_state.metrics.insert("security_level".to_string(), 0.0);
@@ -278,8 +278,8 @@ impl SemanticEngine {
         // Report on current goal
         report.push_str("Current system goal:\n");
         match &self.current_state.current_goal {
-            SystemGoal::QuantumConsensus { target_tps, energy_efficiency, security_level } => {
-                report.push_str(&format!("Quantum consensus:\n"));
+            SystemGoal::CoreConsensus { target_tps, energy_efficiency, security_level } => {
+                report.push_str(&format!("Core consensus:\n"));
                 report.push_str(&format!("  Target TPS: {}\n", target_tps));
                 report.push_str(&format!("  Target energy efficiency: {}\n", energy_efficiency));
                 report.push_str(&format!("  Target security level: {}\n", security_level));
@@ -325,7 +325,7 @@ impl SemanticEngine {
         // Create semantic context for transaction
         let _context = SemanticContext::TransactionContext {
             transaction: transaction.clone(),
-            quantum_state: None, // Will be filled later
+            Core_state: None, // Will be filled later
             error_context: Some(error_context.clone()),
         };
 
@@ -338,8 +338,8 @@ impl SemanticEngine {
                     parameters: HashMap::new(),
                 }
             },
-            ErrorType::QuantumError { state_id, .. } => {
-                ActionType::QuantumAction {
+            ErrorType::CoreError { state_id, .. } => {
+                ActionType::CoreAction {
                     operation: "reinitialize".to_string(),
                     state_id: state_id.clone(),
                     parameters: HashMap::new(),
@@ -366,22 +366,26 @@ impl SemanticEngine {
         action
     }
 
-    pub fn analyze_quantum_state(&mut self, state: &QuantumState) -> Option<SemanticAction> {
-        // Check quantum state for anomalies
+    /* LEGACY: CoreState removed
+    pub fn analyze_Core_state(&mut self, state: &CoreState) -> Option<SemanticAction> {
+        // Check Core state for anomalies
         if state.amplitude < 0.5 {
-            let _context = SemanticContext::QuantumContext {
-                state: QuantumState {
+            let _context = SemanticContext::CoreContext {
+                state: CoreState {
                     id: "anomaly_state".to_string(),
                     shard_id: "0".to_string(),
                     amplitude: state.amplitude,
                     phase: state.phase,
+                    frequency: state.frequency,
+                    wave_vector: state.wave_vector,
+                    origin: state.origin,
                     superposition: state.superposition.clone(),
                 },
-                expected_behavior: "Normal quantum state".to_string(),
+                expected_behavior: "Normal Core state".to_string(),
                 actual_behavior: format!("Low amplitude: {}", state.amplitude),
             };
 
-            let action_type = ActionType::QuantumAction {
+            let action_type = ActionType::CoreAction {
                 operation: "correct_amplitude".to_string(),
                 state_id: state.id.clone(),
                 parameters: HashMap::new(),
@@ -399,6 +403,7 @@ impl SemanticEngine {
             None
         }
     }
+    */
 
     fn calculate_priority(&self, error_type: &ErrorType) -> u8 {
         match error_type {
@@ -411,7 +416,7 @@ impl SemanticEngine {
                     _ => 5,
                 }
             },
-            ErrorType::QuantumError { .. } => 2,
+            ErrorType::CoreError { .. } => 2,
             ErrorType::SemanticError { .. } => 3,
             ErrorType::SystemError { component, .. } => {
                 match component.as_str() {
@@ -419,7 +424,7 @@ impl SemanticEngine {
                     "load_balance" => 2,
                     "latency" => 2,
                     "network_latency" => 2,
-                    "quantum_state" => 2,
+                    "Core_state" => 2,
                     "security_level" => 2,
                     "tps" => 2,
                     _ => 4,
@@ -438,7 +443,7 @@ impl SemanticEngine {
     fn generate_pattern_key(&self, error_type: &ErrorType) -> String {
         match error_type {
             ErrorType::TransactionError { status, .. } => format!("tx_{:?}", status),
-            ErrorType::QuantumError { .. } => "quantum".to_string(),
+            ErrorType::CoreError { .. } => "Core".to_string(),
             ErrorType::SemanticError { .. } => "semantic".to_string(),
             ErrorType::SystemError { component, .. } => format!("system_{}", component),
         }
@@ -481,3 +486,5 @@ impl SemanticEngine {
         Ok(vec![])  // Заглушка
     }
 } 
+
+

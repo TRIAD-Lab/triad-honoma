@@ -1,6 +1,6 @@
 use proptest::prelude::*;
-use triad::tvm::state::StateView;
 use triad::token::Trd20;
+use triad::tvm::state::StateView;
 
 proptest! {
     // Property: sum of balances over used accounts equals total_supply after sequence of mints/transfers

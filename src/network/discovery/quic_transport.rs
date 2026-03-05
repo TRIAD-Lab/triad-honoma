@@ -203,19 +203,16 @@ impl QUICTransportService {
     /// Creates QUIC endpoint
     async fn create_quic_endpoint(&self) -> Result<Endpoint, NetworkError> {
         // Generate certificate
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+        let cert_der = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
             .map_err(|e| NetworkError::Internal(format!("Failed to generate certificate: {}", e)))?;
-        
-        let cert_der = cert.serialize_der()
-            .map_err(|e| NetworkError::Internal(format!("Failed to serialize certificate: {}", e)))?;
-        
-        let priv_key = cert.serialize_private_key_der();
-        
+        let cert = rustls::Certificate(cert_der.cert.der().to_vec());
+        let key = rustls::PrivateKey(cert_der.key_pair.serialize_der());
+
         // Create rustls configuration
         let mut server_crypto = rustls::ServerConfig::builder()
             .with_safe_defaults()
             .with_no_client_auth()
-            .with_single_cert(vec![rustls::Certificate(cert_der)], rustls::PrivateKey(priv_key))
+            .with_single_cert(vec![cert], key)
             .map_err(|e| NetworkError::Internal(format!("Failed to create server config: {}", e)))?;
         
         // Enable 0-RTT if configured
@@ -254,14 +251,17 @@ impl QUICTransportService {
         tokio::spawn(async move {
             info!("📥 QUIC connection acceptor started");
             
-            while let Some(connecting) = endpoint.accept().await {
+            // Quinn 0.11: accept() returns Accept iterator
+            // Need to await it to get next connection
+            while let Some(incoming) = endpoint.accept().await {
                 let event_sender = event_sender.clone();
                 let peer_manager = peer_manager.clone();
                 let connections = connections.clone();
                 let stats = stats.clone();
                 
                 tokio::spawn(async move {
-                    match connecting.await {
+                    // await the Incoming Future to get Connection
+                    match incoming.await {
                         Ok(connection) => {
                             let peer_id = Uuid::new_v4(); // TODO: Extract from connection
                             let remote_addr = connection.remote_address();
@@ -503,7 +503,8 @@ impl QUICTransportService {
             send.write_all(&message_bytes).await
                 .map_err(|e| NetworkError::Internal(format!("Failed to send message: {}", e)))?;
             
-            send.finish().await
+            send.finish()
+                .await
                 .map_err(|e| NetworkError::Internal(format!("Failed to finish stream: {}", e)))?;
             
             // Update stats
@@ -524,13 +525,12 @@ impl QUICTransportService {
         let mut root_cert_store = rustls::RootCertStore::empty();
         
         // Generate certificate (same as server for testing)
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+        let cert_der = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
             .map_err(|e| NetworkError::Internal(format!("Failed to generate client certificate: {}", e)))?;
         
-        let cert_der = cert.serialize_der()
-            .map_err(|e| NetworkError::Internal(format!("Failed to serialize client certificate: {}", e)))?;
+        let cert = rustls::Certificate(cert_der.cert.der().to_vec());
         
-        root_cert_store.add(&rustls::Certificate(cert_der))
+        root_cert_store.add(&cert)
             .map_err(|e| NetworkError::Internal(format!("Failed to add certificate to store: {}", e)))?;
         
         let mut client_crypto = rustls::ClientConfig::builder()
@@ -556,3 +556,5 @@ impl QUICTransportService {
         self.connections.read().await.len()
     }
 }
+
+

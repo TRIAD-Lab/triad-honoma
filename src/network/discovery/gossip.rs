@@ -531,3 +531,5 @@ impl GossipService {
     /// Gets active topics
     pub async fn get_active_topics(&self) -> Vec<String> { self.subscriptions.iter().map(|s| s.clone()).collect() }
 }
+
+

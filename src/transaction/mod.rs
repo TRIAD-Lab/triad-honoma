@@ -25,6 +25,8 @@ pub struct Transaction {
     pub timestamp: SystemTime,
     pub status: TransactionStatus,
     pub data: Vec<u8>,
+    pub signature: Vec<u8>, // Added for Schnorr signature
+    pub parent_ids: Vec<String>, // Added for DAG
 }
 
 impl Transaction {
@@ -38,6 +40,8 @@ impl Transaction {
             amount,
             status: TransactionStatus::Pending,
             data,
+            signature: Vec::new(),
+            parent_ids: Vec::new(),
         }
     }
 
@@ -50,6 +54,16 @@ impl Transaction {
     pub fn is_valid(&self) -> bool {
         self.amount > 0.0 && !self.sender.is_empty() && !self.receiver.is_empty()
     }
+
+    /// Phase 3: Zero-copy serialization with postcard
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        postcard::to_stdvec(self).map_err(|e| format!("Serialization error: {}", e))
+    }
+
+    /// Phase 3: Zero-copy deserialization with postcard
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        postcard::from_bytes(bytes).map_err(|e| format!("Deserialization error: {}", e))
+    }
 }
 
 /// Трейт для обработки транзакций
@@ -57,12 +71,13 @@ pub trait TransactionProcessor {
     fn process(&self, transaction: &mut Transaction) -> Result<(), String>;
     fn process_batch(&self, transactions: &mut [Transaction]) -> Result<(), String>;
     fn verify(&self, transaction: &Transaction) -> bool;
-    fn create_wave_from_transaction(&self, transaction: &Transaction) -> crate::quantum::field::QuantumWave;
-    fn create_probabilistic_decision(&self, analysis: &crate::quantum::interference::InterferenceAnalysis, transactions: &[Transaction]) -> crate::quantum::prob_ops::ProbabilisticOperation;
+    fn create_wave_from_transaction(&self, transaction: &Transaction) -> crate::core::field::CoreWave;
+    fn create_probabilistic_decision(&self, analysis: &crate::core::interference::InterferenceAnalysis, transactions: &[Transaction]) -> crate::core::prob_ops::ProbabilisticOperation;
     fn calculate_transaction_quality(&self, transactions: &[Transaction]) -> f64;
     fn calculate_ttl_factor(&self) -> f64;
     fn calculate_sender_reputation(&self, transactions: &[Transaction]) -> f64;
-    fn create_verification_decision(&self, analysis: &crate::quantum::interference::InterferenceAnalysis, transaction: &Transaction) -> crate::quantum::prob_ops::ProbabilisticOperation;
+    fn create_verification_decision(&self, analysis: &crate::core::interference::InterferenceAnalysis, transaction: &Transaction) -> crate::core::prob_ops::ProbabilisticOperation;
+    fn default_batch_context(&self) -> crate::core::consensus::BatchContextHandle;
 }
 
 /// Трейт для хранения транзакций
@@ -98,4 +113,7 @@ pub trait SmartContractProcessor {
     fn verify(&self, contract: &SmartContract) -> bool;
 }
 
-pub mod processor; 
+pub mod processor;
+pub mod payload; 
+
+

@@ -1,0 +1,5 @@
+[toolchain]
+channel = "nightly-2025-11-19"
+components = ["rust-src", "rustc-dev", "llvm-tools-preview"]
+# targets = ["x86_64-apple-darwin", "aarch64-apple-darwin"]  # Только для macOS кросс-компиляции
+profile = "minimal"

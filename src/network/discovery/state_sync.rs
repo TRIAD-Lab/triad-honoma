@@ -517,11 +517,8 @@ impl StateSyncService {
     
     /// Calculates hash of chunk data
     fn calculate_chunk_hash(data: &[u8]) -> Vec<u8> {
-        use sha2::{Sha256, Digest};
-        
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        hasher.finalize().to_vec()
+        // Use blake3 for fast hashing (coding-guidelines: prefer blake3 over sha2)
+        blake3::hash(data).as_bytes().to_vec()
     }
     
     /// Applies downloaded state to local storage
@@ -606,3 +603,5 @@ impl Clone for StateSyncService {
         }
     }
 }
+
+

@@ -207,3 +207,4 @@ impl ErrorAnalyzer {
         self.solutions_history.clone()
     }
 } 
+

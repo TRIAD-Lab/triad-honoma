@@ -218,23 +218,23 @@ impl LibP2PDiscoveryService {
     fn identity_path() -> PathBuf {
         let mut p = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         p.push(".triad");
-        p.push("identity.ed25519");
+        p.push("identity.secp256k1");
         p
     }
 
     fn load_or_generate_identity() -> identity::Keypair {
         let path = Self::identity_path();
         if let Some(dir) = path.parent() { let _ = fs::create_dir_all(dir); }
-        if let Ok(bytes) = fs::read(&path) {
-            if let Ok(kp) = identity::Keypair::from_protobuf_encoding(&bytes) {
-                return kp;
+        // Load or generate identity key (Secp256k1)
+        let id_keys = match fs::read(&path) {
+            Ok(bytes) => identity::Keypair::from_protobuf_encoding(&bytes).expect("Failed to decode identity key"),
+            Err(_) => {
+                let key = identity::Keypair::generate_secp256k1();
+                fs::write(&path, key.to_protobuf_encoding().expect("Failed to encode identity key")).expect("Failed to write identity key");
+                key
             }
-        }
-        let kp = identity::Keypair::generate_ed25519();
-        if let Ok(bytes) = kp.to_protobuf_encoding() {
-            let _ = fs::write(&path, bytes);
-        }
-        kp
+        };
+        id_keys
     }
 
     /// Build transport stack for WAN: QUIC OR (Relay OR TCP) with Noise+Yamux
@@ -514,3 +514,5 @@ impl libp2p::swarm::Executor for TokioExecutor {
         tokio::spawn(future);
     }
 }
+
+

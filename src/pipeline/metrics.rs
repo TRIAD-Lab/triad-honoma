@@ -51,8 +51,10 @@ impl StageMetrics {
             let sec = elapsed.as_secs_f64();
             let acc_tps = (self.accepted as f64) / sec;
             let proc_tps = (self.processed as f64) / sec;
-            tracing::info!(target: "pipeline", "{}: TPS(acc)={:.0} TPS(proc)={:.0} p50={:.2}ms p95={:.2}ms p99={:.2}ms | queue p50={:.2}ms p95={:.2}ms p99={:.2}ms", stage, acc_tps, proc_tps, self.hist.p50(), self.hist.p95(), self.hist.p99(), self.queue_hist.p50(), self.queue_hist.p95(), self.queue_hist.p99());
+            log::info!(target: "pipeline", "{}: TPS(acc)={:.0} TPS(proc)={:.0} p50={:.2}ms p95={:.2}ms p99={:.2}ms | queue p50={:.2}ms p95={:.2}ms p99={:.2}ms", stage, acc_tps, proc_tps, self.hist.p50(), self.hist.p95(), self.hist.p99(), self.queue_hist.p50(), self.queue_hist.p95(), self.queue_hist.p99());
             self.accepted = 0; self.processed = 0; self.last_report = now;
         }
     }
 }
+
+

@@ -6,18 +6,18 @@ use serde_json;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SemanticContext {
-    // Quantum context
-    QuantumSuperposition {
+    // Core context
+    CoreSuperposition {
         state_vector: Vec<f64>,
         expected_behavior: String,
         actual_behavior: String,
     },
-    QuantumEntanglement {
+    CoreEntanglement {
         qubits: Vec<String>,
         correlation_strength: f64,
         expected_correlation: f64,
     },
-    QuantumDecoherence {
+    CoreDecoherence {
         coherence_time: Duration,
         expected_coherence: Duration,
         environmental_factors: Vec<String>,
@@ -42,7 +42,7 @@ pub enum SemanticContext {
         current_round: u64,
         expected_round: u64,
         participant_states: HashMap<String, String>,
-        quantum_contributions: HashMap<String, f64>,
+        Core_contributions: HashMap<String, f64>,
     },
 
     // System context
@@ -135,20 +135,20 @@ impl SemanticAnalyzer {
 
     fn analyze_semantic_impact(&self, context: &SemanticContext) -> SemanticImpact {
         match context {
-            SemanticContext::QuantumSuperposition { state_vector, expected_behavior, actual_behavior } => {
+            SemanticContext::CoreSuperposition { state_vector, expected_behavior, actual_behavior } => {
                 let affected_semantics = vec![
-                    "Quantum superposition".to_string(),
+                    "Core superposition".to_string(),
                     "Probabilistic distribution".to_string(),
                 ];
                 
-                let propagation_path = self.analyze_quantum_propagation(state_vector);
+                let propagation_path = self.analyze_Core_propagation(state_vector);
                 
                 SemanticImpact {
                     affected_semantics,
                     propagation_path,
-                    confidence_level: self.calculate_quantum_confidence(state_vector),
+                    confidence_level: self.calculate_Core_confidence(state_vector),
                     system_implications: vec![
-                        "Influence on quantum computing".to_string(),
+                        "Influence on Core computing".to_string(),
                         "Influence on consensus".to_string(),
                     ],
                 }
@@ -185,10 +185,10 @@ impl SemanticAnalyzer {
         let mut chain = Vec::new();
         
         match context {
-            SemanticContext::QuantumSuperposition { state_vector, expected_behavior, actual_behavior } => {
-                // Analysis of causal relationships in quantum context
+            SemanticContext::CoreSuperposition { state_vector, expected_behavior, actual_behavior } => {
+                // Analysis of causal relationships in Core context
                 chain.push(CausalLink {
-                    cause: "Incorrect quantum state initialization".to_string(),
+                    cause: "Incorrect Core state initialization".to_string(),
                     effect: "Deviation from expected behavior".to_string(),
                     confidence: 0.8,
                     evidence: vec![
@@ -218,21 +218,21 @@ impl SemanticAnalyzer {
 
     fn determine_resolution_path(&self, context: &SemanticContext, causal_chain: &[CausalLink]) -> Option<ResolutionPath> {
         match context {
-            SemanticContext::QuantumSuperposition { state_vector, expected_behavior, actual_behavior } => {
+            SemanticContext::CoreSuperposition { state_vector, expected_behavior, actual_behavior } => {
                 Some(ResolutionPath {
                     steps: vec![
                         ResolutionStep {
-                            action: "Quantum state reinitialization".to_string(),
+                            action: "Core state reinitialization".to_string(),
                             expected_effect: "Restoration of correct superposition".to_string(),
-                            verification_method: "Quantum state check".to_string(),
+                            verification_method: "Core state check".to_string(),
                         },
                         ResolutionStep {
-                            action: "Quantum operation calibration".to_string(),
+                            action: "Core operation calibration".to_string(),
                             expected_effect: "Improved measurement accuracy".to_string(),
-                            verification_method: "Quantum tomography".to_string(),
+                            verification_method: "Core tomography".to_string(),
                         },
                     ],
-                    expected_outcome: "Restoration of expected quantum behavior".to_string(),
+                    expected_outcome: "Restoration of expected Core behavior".to_string(),
                     confidence: 0.85,
                 })
             },
@@ -259,12 +259,12 @@ impl SemanticAnalyzer {
         }
     }
 
-    fn analyze_quantum_propagation(&self, state_vector: &[f64]) -> Vec<String> {
-        // Analysis of quantum effect propagation
+    fn analyze_Core_propagation(&self, state_vector: &[f64]) -> Vec<String> {
+        // Analysis of Core effect propagation
         vec![
-            "Quantum state".to_string(),
+            "Core state".to_string(),
             "Probabilistic distribution".to_string(),
-            "Quantum operations".to_string(),
+            "Core operations".to_string(),
         ]
     }
 
@@ -277,8 +277,8 @@ impl SemanticAnalyzer {
         ]
     }
 
-    fn calculate_quantum_confidence(&self, state_vector: &[f64]) -> f64 {
-        // Calculation of quantum confidence
+    fn calculate_Core_confidence(&self, state_vector: &[f64]) -> f64 {
+        // Calculation of Core confidence
         let norm: f64 = state_vector.iter().map(|x| x * x).sum();
         if norm > 0.0 {
             1.0 - (norm - 1.0).abs()
@@ -331,3 +331,5 @@ impl SemanticAnalyzer {
         }
     }
 } 
+
+
